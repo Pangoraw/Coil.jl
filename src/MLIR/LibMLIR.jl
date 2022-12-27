@@ -1,0 +1,293 @@
+module LibMLIR
+
+const libmlir = expanduser("~/Projects/iree-build/lib/libIREECompiler.so.0")
+# using MLIR_jll: libMLIR
+# const libmlir = libMLIR
+
+### Types
+
+# storage = void*
+for T in (:MlirContext,
+    :MlirDialect,
+    :MlirDialectRegistry,
+    :MlirOperation,
+    :MlirOpOperand,
+    :MlirOpPrintingFlags,
+    :MlirBlock,
+    :MlirRegion,
+    :MlirSymbolTable,
+    :MlirPass,
+    :MlirExternalPass,
+    :MlirPassManager,
+    :MlirOpPassManager,)
+    @eval struct $T
+        ptr::Ptr{Cvoid}
+    end
+end
+
+# storage = const void*
+for T in (:MlirAttribute,
+    :MlirIdentifier,
+    :MlirLocation,
+    :MlirModule,
+    :MlirType,
+    :MlirValue,)
+    @eval struct $T
+        ptr::Ptr{Cvoid}
+    end
+end
+
+struct MlirLogicalResult
+    value::Int8
+end
+
+struct MlirStringRef
+    char::Ptr{Cchar}
+    length::Csize_t
+end
+
+struct MlirNamedAttribute
+    name::MlirIdentifier
+    attribute::MlirAttribute
+end
+
+const intptr_t = Clong
+
+mlirIsNull(val) = val.ptr == C_NULL
+
+### Logical Result
+
+mlirLogicalResultIsSuccess(result) = result.value != 0
+mlirLogicalResultIsFailure(result) = result.value == 0
+mlirLogicalResultSuccess() = MlirLogicalResult(one(Int8))
+mlirLogicalResultFailure() = MlirLogicalResult(zero(Int8))
+
+### Context
+
+mlirContextCreate() = @ccall libmlir.mlirContextCreate()::MlirContext
+mlirContextDestroy(context) = @ccall libmlir.mlirContextDestroy(context::MlirContext)::Cvoid
+mlirContextGetNumLoadedDialects(context) = @ccall libmlir.mlirContextGetNumLoadedDialects(context::MlirContext)::Cint
+mlirContextGetOrLoadDialect(context, dialect) = @ccall libmlir.mlirContextGetOrLoadDialect(context::MlirContext, dialect::MlirStringRef)::MlirDialect
+mlirContextIsRegisteredOperation(context, op) = @ccall libmlir.mlirContextIsRegisteredOperation(context::MlirContext, op::MlirStringRef)::Bool
+mlirContextIsNull(context) = mlirIsNull(context)
+
+### Dialect
+
+mlirDialectIsNull(dialect) = mlirIsNull(dialect)
+mlirDialectGetNamespace(dialect) = @ccall libmlir.mlirDialectGetNamespace(dialect::MlirDialect)::MlirStringRef
+mlirDialectGetContext(dialect) = @ccall libmlir.mlirDialectGetContext(dialect::MlirDialect)::MlirContext
+
+### Location
+
+mlirLocationIsNull(location) = mlirIsNull(location)
+mlirLocationPrint(location, callback, userdata) =
+    @ccall libmlir.mlirLocationPrint(location::MlirLocation, callback::Ptr{Cvoid}, userdata::Ptr{Cvoid})::Cvoid
+mlirLocationUnknownGet(context) = @ccall libmlir.mlirLocationUnknownGet(context::MlirContext)::MlirLocation
+mlirLocationmlirLocationFileLineColGet(context, filename, line, column) =
+    @ccall libmlir.mlirLocationmlirLocationFileLineColGet(
+        context::MlirContext,
+        filename::MlirStringRef,
+        line::Cuint,
+        column::Cuint,
+    )::MlirLocation
+
+### Type
+
+mlirTypeDump(type) = @ccall libmlir.mlirTypeDump(type::MlirType)::Cvoid
+mlirTypeIsNull(type) = mlirIsNull(type)
+mlirIntegerTypeGet(context, size) = @ccall libmlir.mlirIntegerTypeGet(context::MlirContext, size::Cuint)::MlirType
+mlirF32TypeGet(context) = @ccall libmlir.mlirF32TypeGet(context::MlirContext)::MlirType
+mlirF64TypeGet(context) = @ccall libmlir.mlirF64TypeGet(context::MlirContext)::MlirType
+mlirFunctionTypeGet(context, nargs, args, nresults, results) =
+    @ccall libmlir.mlirFunctionTypeGet(context::MlirContext, nargs::intptr_t, args::Ptr{MlirType}, nresults::intptr_t, results::Ptr{MlirType})::MlirType
+mlirRankedTensorTypeGetChecked(location, rank, shape, eltype, encoding) =
+    @ccall libmlir.mlirRankedTensorTypeGetChecked(
+        location::MlirLocation,
+        rank::intptr_t,
+        shape::Ptr{Clong},
+        eltype::MlirType,
+        encoding::MlirAttribute,
+    )::MlirType
+mlirShapedTypeGetElementType(type) = 
+    @ccall libmlir.mlirShapedTypeGetElementType(type::MlirType)::MlirType
+mlirTypeIsARankedTensor(type) =
+    @ccall libmlir.mlirTypeIsARankedTensor(type::MlirType)::Bool
+mlirTypeIsAShaped(type) =
+    @ccall libmlir.mlirTypeIsAShaped(type::MlirType)::Bool
+
+### Attributes
+
+mlirAttributeGetNull() = @ccall libmlir.mlirAttributeGetNull()::MlirAttribute
+mlirStringAttrGet(context, str) = @ccall libmlir.mlirStringAttrGet(context::MlirContext, str::MlirStringRef)::MlirAttribute
+mlirTypeAttrGet(type) = @ccall libmlir.mlirTypeAttrGet(type::MlirType)::MlirAttribute
+mlirAttributeGetContext(attribute) = @ccall libmlir.mlirAttributeGetContext(attribute::MlirAttribute)::MlirContext
+mlirAttributeParseGet(context, str) = @ccall libmlir.mlirAttributeParseGet(context::MlirContext, str::MlirStringRef)::MlirAttribute
+mlirDenseElementsAttrFloatGet(type, nfloats, floats) =
+    @ccall libmlir.mlirDenseElementsAttrFloatGet(type::MlirType, nfloats::intptr_t, floats::Ptr{Cfloat})::MlirAttribute
+mlirDenseElementsAttrInt32Get(type, nints, ints) =
+    @ccall libmlir.mlirDenseElementsAttrInt32Get(type::MlirType, nints::intptr_t, ints::Ptr{Int32})::MlirAttribute
+mlirDenseElementsAttrInt64Get(type, nints, ints) =
+    @ccall libmlir.mlirDenseElementsAttrInt64Get(type::MlirType, nints::intptr_t, ints::Ptr{Int64})::MlirAttribute
+mlirFloatAttrDoubleGet(context, type, f) =
+    @ccall libmlir.mlirFloatAttrDoubleGet(context::MlirContext, type::MlirType, f::Cdouble)::MlirAttribute
+mlirIntegerAttrGet(type, i) =
+    @ccall libmlir.mlirIntegerAttrGet(type::MlirType, i::Int64)::MlirAttribute
+mlirIntegerAttrGetValueInt(attribute) =
+    @ccall libmlir.mlirIntegerAttrGetValueInt(attribute::MlirAttribute)::Clong
+mlirAttributeIsAInteger(attribute) =
+    @ccall libmlir.mlirAttributeIsAInteger(attribute::MlirAttribute)::Bool
+mlirAttributeIsAType(attribute) =
+    @ccall libmlir.mlirAttributeIsAType(attribute::MlirAttribute)::Bool
+mlirAttributeIsAFloat(attribute) =
+    @ccall libmlir.mlirAttributeIsAFloat(attribute::MlirAttribute)::Bool
+
+### Identifier
+
+mlirIdentifierGet(context, str) = @ccall libmlir.mlirIdentifierGet(context::MlirContext, str::MlirStringRef)::MlirIdentifier
+mlirIdentifierStr(ident) = @ccall libmlir.mlirIdentifierStr(ident::MlirIdentifier)::MlirStringRef
+
+### Named Attributes
+
+mlirNamedAttributeGet(name, attr) =
+    @ccall libmlir.mlirNamedAttributeGet(name::MlirIdentifier, attr::MlirAttribute)::MlirNamedAttribute
+
+### Region
+
+mlirRegionCreate() = @ccall libmlir.mlirRegionCreate()::MlirRegion
+mlirRegionDestroy(region) = @ccall libmlir.mlirRegionDestroy(region::MlirRegion)::Cvoid
+mlirRegionIsNull(region) = mlirIsNull(region)
+mlirRegionAppendOwnedBlock(region, block) = @ccall libmlir.mlirRegionAppendOwnedBlock(region::MlirRegion, block::MlirBlock)::Cvoid
+mlirRegionInsertOwnedBlock(region, pos, block) =
+    @ccall libmlir.mlirRegionInsertOwnedBlock(region::MlirRegion, pos::intptr_t, block::MlirBlock)::Cvoid
+mlirRegionInsertOwnedBlockAfter(region, reference, block) =
+    @ccall libmlir.mlirRegionInsertOwnedBlockAfter(region::MlirRegion, reference::MlirBlock, block::MlirBlock)::Cvoid
+mlirRegionInsertOwnedBlockBefore(region, reference, block) =
+    @ccall libmlir.mlirRegionInsertOwnedBlockBefore(region::MlirRegion, reference::MlirBlock, block::MlirBlock)::Cvoid
+
+### Block
+
+mlirBlockCreate(nargs, args, locs) = @ccall libmlir.mlirBlockCreate(nargs::intptr_t, args::Ptr{MlirType}, locs::Ptr{MlirLocation})::MlirBlock
+mlirBlockDestroy(block) = @ccall libmlir.mlirBlockDestroy(block::MlirBlock)::Cvoid
+mlirBlockIsNull(block) = mlirIsNull(block)
+mlirBlockDetach(block) = @ccall libmlir.mlirBlockDetach(block::MlirBlock)::Cvoid
+mlirBlockAppendOwnedOperation(block, operation) =
+    @ccall libmlir.mlirBlockAppendOwnedOperation(block::MlirBlock, operation::MlirOperation)::Cvoid
+mlirBlockInsertOwnedOperation(block, pos, operation) =
+    @ccall libmlir.mlirBlockInsertOwnedOperation(block::MlirBlock, pos::intptr_t, operation::MlirOperation)::Cvoid
+mlirBlockInsertOwnedOperationAfter(block, reference, operation) =
+    @ccall libmlir.mlirBlockInsertOwnedOperationAfter(block::MlirBlock, reference::MlirOperation, operation::MlirOperation)::Cvoid
+mlirBlockInsertOwnedOperationBefore(block, reference, operation) =
+    @ccall libmlir.mlirBlockInsertOwnedOperationBefore(block::MlirBlock, reference::MlirOperation, operation::MlirOperation)::Cvoid
+mlirBlockGetArgument(block, i) = @ccall libmlir.mlirBlockGetArgument(block::MlirBlock, i::intptr_t)::MlirValue
+mlirBlockGetNumArguments(block) = @ccall libmlir.mlirBlockGetNumArguments(block::MlirBlock)::intptr_t
+mlirBlockAddArgument(block, type, loc) =
+    @ccall libmlir.mlirBlockAddArgument(block::MlirBlock, type::MlirType, loc::MlirLocation)::Cvoid
+mlirBlockPrint(block, callback, userdata) =
+    @ccall libmlir.mlirBlockAddArgument(block::MlirBlock, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
+
+### Value
+
+mlirValueGetType(value) = @ccall libmlir.mlirValueGetType(value::MlirValue)::MlirType
+mlirValueIsNull(value) = mlirIsNull(value)
+mlirValueDump(value) = @ccall libmlir.mlirValueDump(value::MlirValue)::Cvoid
+mlirValuePrint(value, callback, userdata) = @ccall libmlir.mlirValuePrint(value::MlirValue, callback::Ptr{Cvoid}, userdata::Ptr{Cvoid})::Cvoid
+mlirValueGetFirstUse(value) = @ccall libmlir.mlirValueGetFirstUse(value::MlirValue)::MlirOpOperand
+
+### OperationState
+
+"""
+An auxiliary class for constructing operations.
+
+This class contains all the information necessary to construct the
+operation. It owns the MlirRegions it has pointers to and does not own
+anything else. By default, the state can be constructed from a name and
+location, the latter being also used to access the context, and has no other
+components. These components can be added progressively until the operation
+is constructed. Users are not expected to rely on the internals of this
+class and should use mlirOperationState* functions instead.
+"""
+mutable struct MlirOperationState
+    name::MlirStringRef
+    location::MlirLocation
+    nResults::intptr_t
+    results::Ptr{MlirType}
+    nOperands::intptr_t
+    operands::Ptr{MlirValue}
+    nRegions::intptr_t
+    regions::Ptr{MlirRegion}
+    nSuccessors::intptr_t
+    successors::Ptr{MlirBlock}
+    nAttributes::intptr_t
+    attributes::Ptr{MlirNamedAttribute}
+    enableResultTypeInference::Bool
+end
+
+mlirOperationStateGet(name, location) =
+    @ccall libmlir.mlirOperationStateGet(name::MlirStringRef, location::MlirLocation)::MlirOperationState
+mlirOperationStateAddResults(state, n, results) =
+    @ccall libmlir.mlirOperationStateAddResults(
+        state::Ptr{MlirOperationState},
+        n::intptr_t, results::Ptr{MlirType}
+    )::Cvoid
+mlirOperationStateAddOperands(state, n, operands) =
+    @ccall libmlir.mlirOperationStateAddOperands(
+        state::Ptr{MlirOperationState},
+        n::intptr_t, operands::Ptr{MlirValue}
+    )::Cvoid
+mlirOperationStateAddOwnedRegions(state, n, regions) =
+    @ccall libmlir.mlirOperationStateAddOwnedRegions(
+        state::Ptr{MlirOperationState},
+        n::intptr_t, regions::Ptr{MlirRegion}
+    )::Cvoid
+mlirOperationStateAddSuccessors(state, n, successors) =
+    @ccall libmlir.mlirOperationStateAddSuccessors(
+        state::Ptr{MlirOperationState},
+        n::intptr_t, successors::Ptr{MlirBlock}
+    )::Cvoid
+mlirOperationStateAddAttributes(state, n, attributes) =
+    @ccall libmlir.mlirOperationStateAddAttributes(
+        state::Ptr{MlirOperationState},
+        n::intptr_t,
+        attributes::Ptr{MlirNamedAttribute}
+    )::Cvoid
+mlirOperationStateEnableResultTypeInference(state) =
+    @ccall libmlir.mlirOperationStateEnableResultTypeInference(state::MlirOperationState)::Cvoid
+
+### Operation
+
+mlirOperationCreate(state) = @ccall libmlir.mlirOperationCreate(state::Ptr{MlirOperationState})::MlirOperation
+mlirOperationDestroy(operation) = @ccall libmlir.mlirOperationDestroy(operation::MlirOperation)::Cvoid
+mlirOperationIsNull(operation) = mlirIsNull(operation)
+mlirOperationDump(operation) = @ccall libmlir.mlirOperationDump(operation::Ptr{MlirOperation})::Cvoid
+mlirOperationPrint(operation, callback, userdata) =
+    @ccall libmlir.mlirOperationPrint(operation::MlirOperation, callback::Ptr{Cvoid}, userdata::Ptr{Cvoid})::Cvoid
+mlirOperationGetNumResults(operation) = @ccall libmlir.mlirOperationGetNumResults(operation::MlirOperation)::intptr_t
+mlirOperationGetResult(operation, i) = @ccall libmlir.mlirOperationGetResult(operation::MlirOperation, i::intptr_t)::MlirValue
+mlirOperationClone(operation) = @ccall libmlir.mlirOperationClone(operation::MlirOperation)::MlirOperation
+mlirOperationEqual(op, other) = @ccall libmlir.mlirOperationEqual(op::MlirOperation, other::MlirOperation)::Bool
+mlirOperationGetLocation(operation) = @ccall libmlir.mlirOperationGetLocation(operation::MlirOperation)::MlirLocation
+mlirOperationGetName(operation) = @ccall libmlir.mlirOperationGetName(operation::MlirOperation)::MlirIdentifier
+mlirOperationGetBlock(operation) = @ccall libmlir.mlirOperationGetBlock(operation::MlirOperation)::MlirBlock
+mlirOperationGetParentOperation(operation) = @ccall libmlir.mlirOperationGetParentOperation(operation::MlirOperation)::MlirOperation
+
+### Module
+
+mlirModuleCreateEmpty(location) = @ccall libmlir.mlirModuleCreateEmpty(location::MlirLocation)::MlirModule
+mlirModuleDestroy(module_) = @ccall libmlir.mlirModuleDestroy(module_::MlirModule)::Cvoid
+mlirModuleIsNull(module_) = mlirIsNull(module_)
+mlirModuleGetBody(module_) = @ccall libmlir.mlirModuleGetBody(module_::MlirModule)::MlirBlock
+mlirModuleGetOperation(module_) = @ccall libmlir.mlirModuleGetOperation(module_::MlirModule)::MlirOperation
+
+### Pass Manager
+
+mlirPassManagerCreate(context) = @ccall libmlir.mlirPassManagerCreate(context::MlirContext)::MlirPassManager
+mlirPassManagerDestroy(pass) = @ccall libmlir.mlirPassManagerDestroy(pass::MlirPassManager)::Cvoid
+mlirPassManagerIsNull(pass) = mlirIsNull(pass)
+mlirPassManagerGetAsOpPassManager(pass) = @ccall libmlir.mlirPassManagerGetAsOpPassManager(pass::MlirPassManager)::MlirOpPassManager
+mlirPassManagerRun(pass, module_) = @ccall libmlir.mlirPassManagerRun(pass::MlirPassManager, module_::MlirModule)::MlirLogicalResult
+
+### Op Pass Manager
+
+mlirOpPassManagerIsNull(op_pass) = mlirIsNull(op_pass)
+
+end # module LibMLIR
