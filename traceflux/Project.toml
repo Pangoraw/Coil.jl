@@ -1,0 +1,6 @@
+[deps]
+Coil = "eff0c448-0737-4a68-acd5-e6b13de23c33"
+CompilerPluginTools = "6b7a57c9-7cc1-4fdf-b7f5-e857abae3638"
+Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+Metalhead = "dbeba491-748d-5e0e-a39e-b530a07fa0cc"
+Umlaut = "92992a2b-8ce5-4a9c-bb9d-58be9a7dc841"

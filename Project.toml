@@ -4,11 +4,12 @@ authors = ["Paul Berg <paul@plutojl.org>"]
 version = "0.1.0"
 
 [deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 CEnum = "fa961155-64e5-5f13-b03f-caf6b980ea82"
+CompilerPluginTools = "6b7a57c9-7cc1-4fdf-b7f5-e857abae3638"
+Functors = "d9f16b24-f501-4c13-a1f2-28368ffc5196"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
-
-[compat]
-julia = "^1.9"
+Umlaut = "92992a2b-8ce5-4a9c-bb9d-58be9a7dc841"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

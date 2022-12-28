@@ -1,9 +1,22 @@
 module IREE
 
-import Libdl
+import Base.Libc.Libdl
 
 const libiree = expanduser("~/Projects/iree-build/lib/libIREECompiler.so.0")
 const libiree_runtime = (expanduser("~/Projects/iree-build/runtime/src/iree/runtime/libiree_runtime_runtime_shared.so"))
+
+export
+    CompilerOptions,
+    Instance,
+    InstanceOptions,
+    SessionOptions,
+    Session,
+    Device,
+    Call,
+    BufferView
+
+export
+    append_bytecode!
 
 include("./compiler.jl")
 include("./runtime.jl")
@@ -11,6 +24,8 @@ include("./runtime.jl")
 import ..MLIR
 using .Compiler:
     IreeCompilerOptions
+
+register_all_dialects!(context) = Compiler.ireeCompilerRegisterAllDialects(context)
 
 mutable struct CompilerOptions
     options::IreeCompilerOptions
@@ -178,7 +193,7 @@ mutable struct Instance
     instance::Ptr{iree_runtime_instance_t}
 end
 
-function Instance(options::InstanceOptions)
+function Instance(options::InstanceOptions=InstanceOptions())
     instance = Instance(Ptr{iree_runtime_instance_t}())
     @iree_check begin
         GC.@preserve instance Runtime.iree_runtime_instance_create(
@@ -201,7 +216,7 @@ mutable struct Device
     Device(device) = finalizer(Runtime.iree_hal_device_release, new(device))
 end
 
-function Device(instance::Instance, driver_name)
+function Device(instance::Instance, driver_name="local-task")
     device = Device(Ptr{iree_hal_device_t}())
     @iree_check begin
         GC.@preserve device Runtime.iree_runtime_instance_try_create_default_device(
@@ -241,9 +256,10 @@ Base.unsafe_convert(::Type{Ptr{iree_runtime_session_options_t}}, options::Sessio
 
 mutable struct Session
     session::Ptr{iree_runtime_session_t}
+    bytecodes::Vector{Vector{UInt8}}
 
     Session(session) = begin
-        finalizer(new(session)) do session
+        finalizer(new(session, [])) do session
             Runtime.iree_runtime_session_release(session.session)
         end
     end
@@ -268,7 +284,10 @@ end
 Base.unsafe_convert(::Type{Ptr{iree_runtime_session_t}}, session::Session) =
     session.session
 
-append_bytecode!(session, bytecode) =
+function append_bytecode!(session, bytecode)
+    bytecode = collect(bytecode)
+    push!(session.bytecodes, bytecode) # keep the buffer around
+
     @iree_check begin
         GC.@preserve bytecode Runtime.iree_runtime_session_append_bytecode_module_from_memory(
             session,
@@ -278,6 +297,9 @@ append_bytecode!(session, bytecode) =
             iree_allocator_null()
         )
     end
+
+    session
+end
 
 ### Runtime Call
 
@@ -330,17 +352,23 @@ which are then turned into `BufferView`).
 """
 struct Call
     call::iree_runtime_call_t
+    session::Session
 
-    Call(call) = begin
+    Call(call, session) = begin
         new(finalizer(call) do call
-            iree_runtime_call_deinitialize(
-                Base.pointer_from_objref(call)
-            )
-        end)
+                iree_runtime_call_deinitialize(
+                    Base.pointer_from_objref(call)
+                )
+            end, session)
     end
 end
 
-function Call(session, full_name)
+function Base.show(io::IO, call::Call)
+    arguments_count, results_count = get_arity(call)
+    print(io, "Call(#= $arguments_count => $results_count =#)")
+end
+
+function Call(session::Session, full_name)
     out_call = iree_runtime_call_t(
         Ptr{iree_runtime_session_t}(),
         iree_vm_function_t(Ptr{iree_vm_module_t}(), zero(UInt16), zero(UInt16)),
@@ -355,11 +383,11 @@ function Call(session, full_name)
         )
     end
     @assert out_call.session == session.session
-    Call(out_call)
+    Call(out_call, session)
 end
 
 Base.unsafe_convert(::Type{Ptr{iree_runtime_call_t}}, call::Call) =
-    Base.unsafe_convert(Ptr{iree_runtime_call_t}, Base.pointer_from_objref(call.call))
+    Ptr{iree_runtime_call_t}(Base.pointer_from_objref(call.call))
 
 """
     get_arity(::Call)::Tuple{Int,Int}
@@ -419,9 +447,6 @@ function set_ref!(list, i, view)
     )
 
     ref_type_name = String(Runtime.iree_vm_ref_type_name(value[].type))
-    @show ref_type_name
-
-    @info "index at" index = (i - 1)
 
     @iree_check GC.@preserve value Runtime.iree_vm_list_set_ref_retain(
         list, i - 1, Base.pointer_from_objref(value)
@@ -442,7 +467,7 @@ function (call::Call)(args...)
         if arg isa AbstractArray && arg_cconv == IREE_RUNTIME_CALLING_CONVENTION_REF
             set_ref!(
                 call.call.inputs, i,
-                BufferView(call.call.session, arg),
+                BufferView(call.session, arg),
             )
         elseif arg_cconv != IREE_RUNTIME_CALLING_CONVENTION_REF
             in_value = Ref(to_vm_value(arg))
@@ -479,7 +504,7 @@ function (call::Call)(args...)
             N = Runtime.iree_hal_buffer_view_shape_rank(buffer_view)
             iree_type = Runtime.iree_hal_buffer_view_element_type(buffer_view)
             T = julia_type(iree_type)
-            return BufferView{T,N}(buffer_view)
+            return BufferView{T,N}(buffer_view, call.session)
         end
 
         out_value = Ref(iree_vm_value_t(Tuple(zero(UInt8) for _ in 1:16)))
@@ -518,10 +543,11 @@ to a buffer view.
 """
 mutable struct BufferView{T,N} <: AbstractArray{T,N}
     view::Ptr{iree_hal_buffer_view_t}
+    session::Session
 
-    BufferView{T,N}(view) where {T,N} = begin
+    BufferView{T,N}(view, session) where {T,N} = begin
         @assert view != C_NULL
-        finalizer(new{T,N}(view)) do view
+        finalizer(new{T,N}(view, session)) do view
             Runtime.iree_hal_buffer_view_release(view.view)
         end
     end
@@ -596,14 +622,34 @@ end
 
 mutable struct iree_hal_buffer_t end
 
+function row_majorize(a::AbstractArray{T,N}) where {T,N}
+    strides = zeros(Int, N)
+    prev = 1
+    for i in N:-1:1
+        strides[i] = prev
+        prev *= size(a,i)
+    end
+
+    out = similar(a)
+    for I in CartesianIndices(a)
+        offset = 1 + sum(strides .* (Tuple(I) .- 1))
+        out[offset] = a[I]
+    end
+    return out
+end
+
 BufferView(_, view::BufferView) = view
 function BufferView(session, a::AbstractArray{T,N}) where {T,N}
+    # Unfortunately, IREE does not support IREE_HAL_ENCODING_TYPE_DENSE_COLUMN_MAJOR
+    # we therefore have to load the buffers in such a way that the data is in row major
+    row_major_a = N > 1 ?
+        row_majorize(a) : a
+
     out_buffer = Ref(Ptr{iree_hal_buffer_view_t}())
-    type = iree_type(T)
-    @info T => type
+
     @iree_check GC.@preserve a out_buffer Runtime.iree_hal_buffer_view_allocate_buffer(
         Runtime.iree_runtime_session_device_allocator(session),
-        N, collect(size(a)),
+        N, collect(size(row_major_a)),
         iree_type(T), Runtime.IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
         Runtime.iree_hal_buffer_params_t(
             Runtime.IREE_HAL_BUFFER_USAGE_DEFAULT | Runtime.IREE_HAL_BUFFER_USAGE_MAPPING,
@@ -612,10 +658,11 @@ function BufferView(session, a::AbstractArray{T,N}) where {T,N}
             zero(Runtime.iree_hal_queue_affinity_t),
             zero(Runtime.iree_device_size_t),
         ),
-        Runtime.iree_const_byte_span_t(pointer(a), sizeof(a)),
+        Runtime.iree_const_byte_span_t(pointer(row_major_a), sizeof(row_major_a)),
         Base.unsafe_convert(Ptr{Ptr{Runtime.iree_hal_buffer_view_t}}, Base.pointer_from_objref(out_buffer),)
     )
-    BufferView{T,N}(out_buffer[])
+
+    BufferView{T,N}(out_buffer[], session)
 end
 
 function Base.size(view::BufferView)
@@ -667,6 +714,7 @@ function dump_view(buffer_view::Ptr{iree_hal_buffer_view_t})
     nothing
 end
 
+Base.getindex(view::BufferView, I::CartesianIndex) = Base.getindex(view, Tuple(I)...)
 function Base.getindex(view::BufferView{T,N}, I...) where {T,N}
     Base.checkbounds(view, I...)
 
@@ -682,8 +730,8 @@ function Base.getindex(view::BufferView{T,N}, I...) where {T,N}
         for (i, idx) in enumerate(I)
         if i <= n_dims
     ]
-    offset = Ref(zero(Runtime.iree_device_size_t))
 
+    offset = Ref(zero(Runtime.iree_device_size_t))
     @iree_check GC.@preserve offset Runtime.iree_hal_buffer_view_compute_offset(
         view, length(indices), indices,
         Base.unsafe_convert(Ptr{Runtime.iree_device_size_t},
@@ -705,7 +753,7 @@ Base.unsafe_convert(::Type{Ptr{T}}, view::BufferView) where {T<:Union{Cvoid,iree
 function vm_value_with_type(f, type)
     value = Ref(iree_vm_value_t(Tuple(zero(UInt8) for _ in 1:16)))
     GC.@preserve value begin
-        val_ptr = Base.unsafe_convert(Ptr{iree_vm_value_t}, Base.pointer_from_objref(value))
+        val_ptr = Ptr{iree_vm_value_t}(Base.pointer_from_objref(value))
         val_ptr.type = type
         f(val_ptr)
     end

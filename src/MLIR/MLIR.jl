@@ -2,6 +2,23 @@ module MLIR
 
 include("./LibMLIR.jl")
 
+export
+    Operation,
+    OperationState,
+    Location,
+    Context,
+    MModule,
+    MType,
+    Region,
+    Block,
+    Attribute,
+    NamedAttribute
+
+export
+    add_results!,
+    add_attributes!,
+    add_owned_regions!
+
 import Base: ==, String
 using .LibMLIR:
     MlirAttribute,
@@ -92,8 +109,15 @@ struct Location
 end
 
 Location(context::Context) = Location(LibMLIR.mlirLocationUnknownGet(context))
-Location(context::Context, filename, line, column) =
-    Location(LibMLIR.mlirLocationmlirLocationFileLineColGet(context, filename, line, column))
+Location(context::Context, filename, line, column=0) =
+    Location(LibMLIR.mlirLocationFileLineColGet(context, filename, line, column))
+Location(context::Context, lin::Core.LineInfoNode) =
+    Location(context, string(lin.file), lin.line)
+Location(context::Context, lin::LineNumberNode) =
+    isnothing(lin.file) ?
+        Location(context) :
+        Location(context, string(lin.file), lin.line)
+Location(context::Context, ::Nothing) = Location(context)
 
 Base.convert(::Type{MlirLocation}, location::Location) = location.location
 
@@ -111,6 +135,8 @@ end
 MType(t::MType) = t
 MType(context::Context, T::Type{<:Signed}) =
     MType(LibMLIR.mlirIntegerTypeGet(context, sizeof(T) * 8))
+MType(context::Context, T::Type{Bool}) =
+    MType(LibMLIR.mlirIntegerTypeGet(context, 1))
 MType(context::Context, ::Type{Float32}) =
     MType(LibMLIR.mlirF32TypeGet(context))
 MType(context::Context, ::Type{Float64}) =
@@ -119,6 +145,7 @@ MType(context::Context, ft::Pair) =
     MType(LibMLIR.mlirFunctionTypeGet(context,
         length(ft.first), [MType(t) for t in ft.first],
         length(ft.second), [MType(t) for t in ft.second]))
+MType(context, a::AbstractArray{T}) where {T} = MType(context, MType(context, T), size(a))
 MType(context, ::Type{<:AbstractArray{T,N}}, dims) where {T,N} =
     MType(LibMLIR.mlirRankedTensorTypeGetChecked(
         Location(context),
@@ -133,6 +160,7 @@ MType(context, element_type::MType, dims) =
         element_type,
         Attribute(),
     ))
+MType(context, ::T) where {T<:Signed} = MType(context, T)
 
 Base.convert(::Type{MlirType}, mtype::MType) = mtype.type
 
@@ -142,6 +170,63 @@ function Base.eltype(type::MType)
     else
         type
     end
+end
+
+function julia_type(type::MType)
+    if LibMLIR.mlirTypeIsAInteger(type)
+        is_signed = LibMLIR.mlirIntegerTypeIsSigned(type)
+        width = LibMLIR.mlirIntegerTypeGetWidth(type)
+
+        if (is_signed, width) == (true, 32)
+            Int32
+        elseif (is_signed, width) == (false, 32)
+            UInt32
+        elseif (is_signed, width) == (true, 16)
+            Int16
+        elseif (is_signed, width) == (false, 16)
+            UInt16
+        elseif (is_signed, width) == (true, 8)
+            Int8
+        elseif (is_signed, width) == (false, 8)
+            UInt8
+        elseif (is_signed, width) == (true, 64)
+            Int64
+        elseif (is_signed, width) == (false, 64)
+            UInt64
+        elseif (is_signed, width) == (true, 1)
+            Bool
+        else
+            t = is_signed ? "i" : "u"
+            throw("could not convert type $(t)$(width) to julia")
+        end
+    elseif LibMLIR.mlirTypeIsAF32(type)
+        Float32
+    elseif LibMLIR.mlirTypeIsAF64(type)
+        Float64
+    else
+        throw("could not convert type $type to julia")
+    end
+end
+
+Base.ndims(type::MType) = if LibMLIR.mlirTypeIsAShaped(type) && LibMLIR.mlirShapedTypeHasRank(type)
+    LibMLIR.mlirShapedTypeGetRank(type)
+else
+    0
+end
+
+function Base.size(type::MType)
+    if LibMLIR.mlirTypeIsAShaped(type) && LibMLIR.mlirShapedTypeHasRank(type)
+        Tuple(
+            LibMLIR.mlirShapedTypeGetDimSize(type, i - 1)
+            for i in 1:LibMLIR.mlirShapedTypeGetRank(type)
+        )
+    else
+        ()
+    end
+end
+
+function is_integer(type::MType)
+    LibMLIR.mlirTypeIsAInteger(type)
 end
 
 ### Attribute
@@ -208,6 +293,8 @@ end
 get_type(value) = MType(LibMLIR.mlirValueGetType(value))
 
 Base.convert(::Type{MlirValue}, value::Value) = value.value
+Base.size(value::Value) = Base.size(get_type(value))
+Base.ndims(value::Value) = Base.ndims(get_type(value))
 
 function Base.show(io::IO, value::Value)
     c_print_callback = @cfunction(print_callback, Cvoid, (MlirStringRef, Any))
@@ -262,6 +349,10 @@ Operation(state::OperationState) = Operation(LibMLIR.mlirOperationCreate(state),
 copy(operation) = Operation(LibMLIR.mlirOperationClone(operation))
 
 num_results(operation) = LibMLIR.mlirOperationGetNumResults(operation)
+get_results(operation) = [
+    get_result(operation, i)
+    for i in 1:num_results(operation)
+]
 function get_result(operation, i)
     i ∉ 1:num_results(operation) && throw(BoundsError(operation, i))
     Value(LibMLIR.mlirOperationGetResult(operation, i - 1))
@@ -284,7 +375,9 @@ end
 function Base.show(io::IO, operation::Operation)
     c_print_callback = @cfunction(print_callback, Cvoid, (MlirStringRef, Any))
     ref = Ref(io)
-    GC.@preserve ref LibMLIR.mlirOperationPrint(operation, c_print_callback, ref)
+    flags = LibMLIR.mlirOpPrintingFlagsCreate()
+    get(io, :debug, false) && LibMLIR.mlirOpPrintingFlagsEnableDebugInfo(flags, true, true)
+    GC.@preserve ref LibMLIR.mlirOperationPrintWithFlags(operation, flags, c_print_callback, ref)
 end
 
 ### Block
@@ -331,6 +424,8 @@ function get_argument(block::Block, i)
     i ∉ 1:num_arguments(block) && throw(BoundsError(block, i))
     Value(LibMLIR.mlirBlockGetArgument(block, i - 1))
 end
+add_argument!(block::Block, type, loc) =
+    Value(LibMLIR.mlirBlockAddArgument(block, type, loc))
 
 Base.convert(::Type{MlirBlock}, block::Block) = block.block
 

@@ -83,8 +83,8 @@ mlirLocationIsNull(location) = mlirIsNull(location)
 mlirLocationPrint(location, callback, userdata) =
     @ccall libmlir.mlirLocationPrint(location::MlirLocation, callback::Ptr{Cvoid}, userdata::Ptr{Cvoid})::Cvoid
 mlirLocationUnknownGet(context) = @ccall libmlir.mlirLocationUnknownGet(context::MlirContext)::MlirLocation
-mlirLocationmlirLocationFileLineColGet(context, filename, line, column) =
-    @ccall libmlir.mlirLocationmlirLocationFileLineColGet(
+mlirLocationFileLineColGet(context, filename, line, column) =
+    @ccall libmlir.mlirLocationFileLineColGet(
         context::MlirContext,
         filename::MlirStringRef,
         line::Cuint,
@@ -108,12 +108,28 @@ mlirRankedTensorTypeGetChecked(location, rank, shape, eltype, encoding) =
         eltype::MlirType,
         encoding::MlirAttribute,
     )::MlirType
+mlirShapedTypeGetDimSize(type, i) =
+    @ccall libmlir.mlirShapedTypeGetDimSize(type::MlirType, i::intptr_t)::Int64
+mlirShapedTypeHasRank(type) =
+    @ccall libmlir.mlirShapedTypeHasRank(type::MlirType)::Bool
+mlirShapedTypeGetRank(type) =
+    @ccall libmlir.mlirShapedTypeGetRank(type::MlirType)::Int64
 mlirShapedTypeGetElementType(type) = 
     @ccall libmlir.mlirShapedTypeGetElementType(type::MlirType)::MlirType
 mlirTypeIsARankedTensor(type) =
     @ccall libmlir.mlirTypeIsARankedTensor(type::MlirType)::Bool
 mlirTypeIsAShaped(type) =
     @ccall libmlir.mlirTypeIsAShaped(type::MlirType)::Bool
+mlirIntegerTypeGetWidth(type) =
+    @ccall libmlir.mlirIntegerTypeGetWidth(type::MlirType)::UInt32
+mlirIntegerTypeIsSigned(type)=
+    @ccall libmlir.mlirIntegerTypeIsSigned(type::MlirType)::Bool
+mlirTypeIsAInteger(type) =
+    @ccall libmlir.mlirTypeIsAInteger(type::MlirType)::Bool
+mlirTypeIsAF32(type) =
+    @ccall libmlir.mlirTypeIsAF32(type::MlirType)::Bool
+mlirTypeIsAF64(type) =
+    @ccall libmlir.mlirTypeIsAF64(type::MlirType)::Bool
 
 ### Attributes
 
@@ -181,7 +197,7 @@ mlirBlockInsertOwnedOperationBefore(block, reference, operation) =
 mlirBlockGetArgument(block, i) = @ccall libmlir.mlirBlockGetArgument(block::MlirBlock, i::intptr_t)::MlirValue
 mlirBlockGetNumArguments(block) = @ccall libmlir.mlirBlockGetNumArguments(block::MlirBlock)::intptr_t
 mlirBlockAddArgument(block, type, loc) =
-    @ccall libmlir.mlirBlockAddArgument(block::MlirBlock, type::MlirType, loc::MlirLocation)::Cvoid
+    @ccall libmlir.mlirBlockAddArgument(block::MlirBlock, type::MlirType, loc::MlirLocation)::MlirValue
 mlirBlockPrint(block, callback, userdata) =
     @ccall libmlir.mlirBlockAddArgument(block::MlirBlock, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
 
@@ -253,12 +269,26 @@ mlirOperationStateAddAttributes(state, n, attributes) =
 mlirOperationStateEnableResultTypeInference(state) =
     @ccall libmlir.mlirOperationStateEnableResultTypeInference(state::MlirOperationState)::Cvoid
 
+### Op Printing Flags
+
+mlirOpPrintingFlagsCreate() =
+    @ccall libmlir.mlirOpPrintingFlagsCreate()::MlirOpPrintingFlags
+mlirOpPrintingFlagsEnableDebugInfo(flags, enable, pretty) =
+    @ccall libmlir.mlirOpPrintingFlagsEnableDebugInfo(flags::MlirOpPrintingFlags, enable::Bool, pretty::Bool)::Cvoid
+
 ### Operation
 
 mlirOperationCreate(state) = @ccall libmlir.mlirOperationCreate(state::Ptr{MlirOperationState})::MlirOperation
 mlirOperationDestroy(operation) = @ccall libmlir.mlirOperationDestroy(operation::MlirOperation)::Cvoid
 mlirOperationIsNull(operation) = mlirIsNull(operation)
 mlirOperationDump(operation) = @ccall libmlir.mlirOperationDump(operation::Ptr{MlirOperation})::Cvoid
+mlirOperationPrintWithFlags(operation, flags, callback, userdata) =
+    @ccall libmlir.mlirOperationPrintWithFlags(
+        operation::MlirOperation,
+        flags::MlirOpPrintingFlags,
+        callback::Ptr{Cvoid},
+        userdata::Ptr{Cvoid},
+    )::Cvoid
 mlirOperationPrint(operation, callback, userdata) =
     @ccall libmlir.mlirOperationPrint(operation::MlirOperation, callback::Ptr{Cvoid}, userdata::Ptr{Cvoid})::Cvoid
 mlirOperationGetNumResults(operation) = @ccall libmlir.mlirOperationGetNumResults(operation::MlirOperation)::intptr_t
