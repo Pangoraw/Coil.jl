@@ -4,14 +4,12 @@ using Coil
 using Metalhead
 using Flux
 
-
 conv = Conv((3,3), 3 => 12) 
-cconv = Coil.compile(conv)
+cconv = Coil.compile(conv; verbose=true)
 
 img = randn(Float32, 224, 224, 3, 1)
 @time cconv(img)
 @time cconv(img)
-
 
 #=
 anet = Metalhead.AlexNet()

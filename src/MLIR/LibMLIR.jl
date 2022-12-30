@@ -62,14 +62,22 @@ mlirLogicalResultIsFailure(result) = result.value == 0
 mlirLogicalResultSuccess() = MlirLogicalResult(one(Int8))
 mlirLogicalResultFailure() = MlirLogicalResult(zero(Int8))
 
+### Dialect Registry
+
+mlirDialectRegistryCreate() = @ccall libmlir.mlirDialectRegistryCreate()::MlirDialectRegistry
+mlirDialectRegistryDestroy(registry) = @ccall libmlir.mlirDialectRegistryDestroy(registry::MlirDialectRegistry)::Cvoid
+mlirRegisterAllDialects(registry) = @ccall libmlir.mlirRegisterAllDialects(registry::MlirDialectRegistry)::Cvoid
+
 ### Context
 
 mlirContextCreate() = @ccall libmlir.mlirContextCreate()::MlirContext
 mlirContextDestroy(context) = @ccall libmlir.mlirContextDestroy(context::MlirContext)::Cvoid
 mlirContextGetNumLoadedDialects(context) = @ccall libmlir.mlirContextGetNumLoadedDialects(context::MlirContext)::Cint
 mlirContextGetOrLoadDialect(context, dialect) = @ccall libmlir.mlirContextGetOrLoadDialect(context::MlirContext, dialect::MlirStringRef)::MlirDialect
+mlirContextLoadAllAvailableDialects(context) = @ccall libmlir.mlirContextLoadAllAvailableDialects(context::MlirContext)::Cvoid
 mlirContextIsRegisteredOperation(context, op) = @ccall libmlir.mlirContextIsRegisteredOperation(context::MlirContext, op::MlirStringRef)::Bool
 mlirContextIsNull(context) = mlirIsNull(context)
+mlirContextAppendDialectRegistry(context, registry) = @ccall libmlir.mlirContextAppendDialectRegistry(context::MlirContext, registry::MlirDialectRegistry)::Cvoid
 
 ### Dialect
 
@@ -95,7 +103,10 @@ mlirLocationFileLineColGet(context, filename, line, column) =
 
 mlirTypeDump(type) = @ccall libmlir.mlirTypeDump(type::MlirType)::Cvoid
 mlirTypeIsNull(type) = mlirIsNull(type)
+mlirIndexTypeGet(context) = @ccall libmlir.mlirIndexTypeGet(context::MlirContext)::MlirType
 mlirIntegerTypeGet(context, size) = @ccall libmlir.mlirIntegerTypeGet(context::MlirContext, size::Cuint)::MlirType
+mlirIntegerTypeSignedGet(context, size) =
+    @ccall libmlir.mlirIntegerTypeSignedGet(context::MlirContext, size::Cuint)::MlirType
 mlirF32TypeGet(context) = @ccall libmlir.mlirF32TypeGet(context::MlirContext)::MlirType
 mlirF64TypeGet(context) = @ccall libmlir.mlirF64TypeGet(context::MlirContext)::MlirType
 mlirFunctionTypeGet(context, nargs, args, nresults, results) =
@@ -122,6 +133,8 @@ mlirTypeIsAShaped(type) =
     @ccall libmlir.mlirTypeIsAShaped(type::MlirType)::Bool
 mlirIntegerTypeGetWidth(type) =
     @ccall libmlir.mlirIntegerTypeGetWidth(type::MlirType)::UInt32
+mlirIntegerTypeIsSignless(type)=
+    @ccall libmlir.mlirIntegerTypeIsSignless(type::MlirType)::Bool
 mlirIntegerTypeIsSigned(type)=
     @ccall libmlir.mlirIntegerTypeIsSigned(type::MlirType)::Bool
 mlirTypeIsAInteger(type) =
@@ -156,6 +169,8 @@ mlirAttributeIsAType(attribute) =
     @ccall libmlir.mlirAttributeIsAType(attribute::MlirAttribute)::Bool
 mlirAttributeIsAFloat(attribute) =
     @ccall libmlir.mlirAttributeIsAFloat(attribute::MlirAttribute)::Bool
+mlirArrayAttrGet(context, nelements, elements) =
+    @ccall libmlir.mlirArrayAttrGet(context::MlirContext, nelements::intptr_t, elements::Ptr{MlirAttribute})::MlirAttribute
 
 ### Identifier
 
@@ -179,6 +194,8 @@ mlirRegionInsertOwnedBlockAfter(region, reference, block) =
     @ccall libmlir.mlirRegionInsertOwnedBlockAfter(region::MlirRegion, reference::MlirBlock, block::MlirBlock)::Cvoid
 mlirRegionInsertOwnedBlockBefore(region, reference, block) =
     @ccall libmlir.mlirRegionInsertOwnedBlockBefore(region::MlirRegion, reference::MlirBlock, block::MlirBlock)::Cvoid
+mlirRegionGetFirstBlock(region) = @ccall libmlir.mlirRegionGetFirstBlock(region::MlirRegion)::MlirBlock
+mlirRegionGetNextInOperation(region) = @ccall libmlir.mlirRegionGetNextInOperation(region::MlirRegion)::MlirRegion
 
 ### Block
 
@@ -200,6 +217,8 @@ mlirBlockAddArgument(block, type, loc) =
     @ccall libmlir.mlirBlockAddArgument(block::MlirBlock, type::MlirType, loc::MlirLocation)::MlirValue
 mlirBlockPrint(block, callback, userdata) =
     @ccall libmlir.mlirBlockAddArgument(block::MlirBlock, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
+mlirBlockGetNextInRegion(block) = @ccall libmlir.mlirBlockGetNextInRegion(block::MlirBlock)::MlirBlock
+mlirBlockGetFirstOperation(block) = @ccall libmlir.mlirBlockGetFirstOperation(block::MlirBlock)::MlirOperation
 
 ### Value
 
@@ -212,6 +231,8 @@ mlirValueGetFirstUse(value) = @ccall libmlir.mlirValueGetFirstUse(value::MlirVal
 ### OperationState
 
 """
+    OperationState(name::AbstractString, loc::Location)
+
 An auxiliary class for constructing operations.
 
 This class contains all the information necessary to construct the
@@ -267,7 +288,7 @@ mlirOperationStateAddAttributes(state, n, attributes) =
         attributes::Ptr{MlirNamedAttribute}
     )::Cvoid
 mlirOperationStateEnableResultTypeInference(state) =
-    @ccall libmlir.mlirOperationStateEnableResultTypeInference(state::MlirOperationState)::Cvoid
+    @ccall libmlir.mlirOperationStateEnableResultTypeInference(state::Ptr{MlirOperationState})::Cvoid
 
 ### Op Printing Flags
 
@@ -281,7 +302,7 @@ mlirOpPrintingFlagsEnableDebugInfo(flags, enable, pretty) =
 mlirOperationCreate(state) = @ccall libmlir.mlirOperationCreate(state::Ptr{MlirOperationState})::MlirOperation
 mlirOperationDestroy(operation) = @ccall libmlir.mlirOperationDestroy(operation::MlirOperation)::Cvoid
 mlirOperationIsNull(operation) = mlirIsNull(operation)
-mlirOperationDump(operation) = @ccall libmlir.mlirOperationDump(operation::Ptr{MlirOperation})::Cvoid
+mlirOperationDump(operation) = @ccall libmlir.mlirOperationDump(operation::MlirOperation)::Cvoid
 mlirOperationPrintWithFlags(operation, flags, callback, userdata) =
     @ccall libmlir.mlirOperationPrintWithFlags(
         operation::MlirOperation,
@@ -291,6 +312,8 @@ mlirOperationPrintWithFlags(operation, flags, callback, userdata) =
     )::Cvoid
 mlirOperationPrint(operation, callback, userdata) =
     @ccall libmlir.mlirOperationPrint(operation::MlirOperation, callback::Ptr{Cvoid}, userdata::Ptr{Cvoid})::Cvoid
+mlirOperationGetNumRegions(operation) = @ccall libmlir.mlirOperationGetNumRegions(operation::MlirOperation)::intptr_t
+mlirOperationGetRegion(operation, pos) = @ccall libmlir.mlirOperationGetRegion(operation::MlirOperation, pos::intptr_t)::MlirRegion
 mlirOperationGetNumResults(operation) = @ccall libmlir.mlirOperationGetNumResults(operation::MlirOperation)::intptr_t
 mlirOperationGetResult(operation, i) = @ccall libmlir.mlirOperationGetResult(operation::MlirOperation, i::intptr_t)::MlirValue
 mlirOperationClone(operation) = @ccall libmlir.mlirOperationClone(operation::MlirOperation)::MlirOperation
@@ -299,6 +322,8 @@ mlirOperationGetLocation(operation) = @ccall libmlir.mlirOperationGetLocation(op
 mlirOperationGetName(operation) = @ccall libmlir.mlirOperationGetName(operation::MlirOperation)::MlirIdentifier
 mlirOperationGetBlock(operation) = @ccall libmlir.mlirOperationGetBlock(operation::MlirOperation)::MlirBlock
 mlirOperationGetParentOperation(operation) = @ccall libmlir.mlirOperationGetParentOperation(operation::MlirOperation)::MlirOperation
+mlirOperationGetNextInBlock(operation) = @ccall libmlir.mlirOperationGetNextInBlock(operation::MlirOperation)::MlirOperation
+mlirOperationGetFirstRegion(operation) = @ccall libmlir.mlirOperationGetFirstRegion(operation::MlirOperation)::MlirRegion
 
 ### Module
 

@@ -115,8 +115,8 @@ Location(context::Context, lin::Core.LineInfoNode) =
     Location(context, string(lin.file), lin.line)
 Location(context::Context, lin::LineNumberNode) =
     isnothing(lin.file) ?
-        Location(context) :
-        Location(context, string(lin.file), lin.line)
+    Location(context) :
+    Location(context, string(lin.file), lin.line)
 Location(context::Context, ::Nothing) = Location(context)
 
 Base.convert(::Type{MlirLocation}, location::Location) = location.location
@@ -135,8 +135,10 @@ end
 MType(t::MType) = t
 MType(context::Context, T::Type{<:Signed}) =
     MType(LibMLIR.mlirIntegerTypeGet(context, sizeof(T) * 8))
-MType(context::Context, T::Type{Bool}) =
-    MType(LibMLIR.mlirIntegerTypeGet(context, 1))
+MType(context::Context, T::Type{<:Unsigned}) =
+    MType(LibMLIR.mlirIntegerTypeGet(context, sizeof(T) * 8))
+MType(context::Context, ::Type{Bool}) =
+    MType(LibMLIR.mlirIntegerTypeSignedGet(context, 1))
 MType(context::Context, ::Type{Float32}) =
     MType(LibMLIR.mlirF32TypeGet(context))
 MType(context::Context, ::Type{Float64}) =
@@ -160,7 +162,10 @@ MType(context, element_type::MType, dims) =
         element_type,
         Attribute(),
     ))
-MType(context, ::T) where {T<:Signed} = MType(context, T)
+MType(context, ::T) where {T<:Real} = MType(context, T)
+MType(_, type::MType) = type
+
+IndexType(context) = MType(LibMLIR.mlirIndexTypeGet(context))
 
 Base.convert(::Type{MlirType}, mtype::MType) = mtype.type
 
@@ -172,9 +177,45 @@ function Base.eltype(type::MType)
     end
 end
 
+function show_inner(io::IO, type::MType)
+    if LibMLIR.mlirTypeIsAInteger(type)
+        is_signless = LibMLIR.mlirIntegerTypeIsSignless(type)
+        is_signed = LibMLIR.mlirIntegerTypeIsSigned(type)
+
+        width = LibMLIR.mlirIntegerTypeGetWidth(type)
+        t = if is_signed
+            "si" 
+       elseif is_signless
+            "i"
+        else
+            "u"
+        end
+        print(io, string(t, width))
+    elseif LibMLIR.mlirTypeIsAF64(type)
+        print(io, "f64")
+    elseif LibMLIR.mlirTypeIsAF32(type)
+        print(io, "f32")
+    elseif LibMLIR.mlirTypeIsARankedTensor(type)
+        print(io, "tensor<")
+        s = size(type)
+        print(io, join(s, "x"), "x")
+        show_inner(io, eltype(type))
+        print(io, ">")
+    else
+        print(io, "unknown")
+    end
+end
+
+function Base.show(io::IO, type::MType)
+    print(io, "MType(\"")
+    show_inner(io, type)
+    print(io, "\")")
+end
+
 function julia_type(type::MType)
     if LibMLIR.mlirTypeIsAInteger(type)
-        is_signed = LibMLIR.mlirIntegerTypeIsSigned(type)
+        is_signed = LibMLIR.mlirIntegerTypeIsSigned(type) ||
+                    LibMLIR.mlirIntegerTypeIsSignless(type)
         width = LibMLIR.mlirIntegerTypeGetWidth(type)
 
         if (is_signed, width) == (true, 32)
@@ -208,11 +249,12 @@ function julia_type(type::MType)
     end
 end
 
-Base.ndims(type::MType) = if LibMLIR.mlirTypeIsAShaped(type) && LibMLIR.mlirShapedTypeHasRank(type)
-    LibMLIR.mlirShapedTypeGetRank(type)
-else
-    0
-end
+Base.ndims(type::MType) =
+    if LibMLIR.mlirTypeIsAShaped(type) && LibMLIR.mlirShapedTypeHasRank(type)
+        LibMLIR.mlirShapedTypeGetRank(type)
+    else
+        0
+    end
 
 function Base.size(type::MType)
     if LibMLIR.mlirTypeIsAShaped(type) && LibMLIR.mlirShapedTypeHasRank(type)
@@ -223,6 +265,10 @@ function Base.size(type::MType)
     else
         ()
     end
+end
+
+function is_tensor(type::MType)
+    LibMLIR.mlirTypeIsAShaped(type)
 end
 
 function is_integer(type::MType)
@@ -257,6 +303,27 @@ function Attribute(context, values::T) where {T<:AbstractArray{Float32}}
     type = MType(context, T, size(values))
     Attribute(
         LibMLIR.mlirDenseElementsAttrFloatGet(type, length(values), values)
+    )
+end
+function Attribute(context, values::AbstractArray{Int32}, type)
+    Attribute(
+        LibMLIR.mlirDenseElementsAttrInt32Get(type, length(values), values)
+    )
+end
+function Attribute(context, values::AbstractArray{Int}, type)
+    Attribute(
+        LibMLIR.mlirDenseElementsAttrInt64Get(type, length(values), values)
+    )
+end
+function Attribute(context, values::AbstractArray{Float32}, type)
+    Attribute(
+        LibMLIR.mlirDenseElementsAttrFloatGet(type, length(values), values)
+    )
+end
+function ArrayAttribute(context, values::AbstractVector{Int})
+    elements = Attribute.((context,), values)
+    Attribute(
+        LibMLIR.mlirArrayAttrGet(context, length(elements), elements)
     )
 end
 
@@ -348,6 +415,11 @@ Operation(state::OperationState) = Operation(LibMLIR.mlirOperationCreate(state),
 
 copy(operation) = Operation(LibMLIR.mlirOperationClone(operation))
 
+num_regions(operation) = LibMLIR.mlirOperationGetNumRegions(operation)
+function get_region(operation, i)
+    i ∈ 1:num_regions(operation) && throw(BoundsError(operation, i))
+    Region(LibMLIR.mlirOperationGetRegion(operation, i - 1), false)
+end
 num_results(operation) = LibMLIR.mlirOperationGetNumResults(operation)
 get_results(operation) = [
     get_result(operation, i)
@@ -361,6 +433,7 @@ get_location(operation) = Location(LibMLIR.mlirOperationGetLocation(operation))
 get_name(operation) = String(LibMLIR.mlirOperationGetName(operation))
 get_block(operation) = Block(LibMLIR.mlirOperationGetBlock(operation), false)
 get_parent_operation(operation) = Operation(LibMLIR.mlirOperationGetParentOperation(operation), false)
+get_dialect(operation) = first(split(get_name(operation), '.')) |> Symbol
 
 op::Operation == other::Operation = LibMLIR.mlirOperationEqual(op, other)
 
@@ -378,6 +451,7 @@ function Base.show(io::IO, operation::Operation)
     flags = LibMLIR.mlirOpPrintingFlagsCreate()
     get(io, :debug, false) && LibMLIR.mlirOpPrintingFlagsEnableDebugInfo(flags, true, true)
     GC.@preserve ref LibMLIR.mlirOperationPrintWithFlags(operation, flags, c_print_callback, ref)
+    println(io)
 end
 
 ### Block
@@ -470,6 +544,8 @@ insert_after!(region::Region, reference::Block, block::Block) =
 insert_before!(region::Region, reference::Block, block::Block) =
     LibMLIR.mlirRegionInsertOwnedBlockBefore(region, reference, lose_ownership!(block))
 
+get_first_block(region::Region) = Block(LibMLIR.mlirRegionGetFirstBlock(region), false)
+
 function lose_ownership!(region::Region)
     @assert region.owned
     @atomic region.owned = false
@@ -482,14 +558,16 @@ Base.convert(::Type{MlirRegion}, region::Region) = region.region
 
 mutable struct MModule
     module_::MlirModule
+    context::Context
 
-    MModule(module_) = begin
+    MModule(module_, context) = begin
         @assert !LibMLIR.mlirModuleIsNull(module_) "cannot create MModule with null MlirModule"
-        finalizer(LibMLIR.mlirModuleDestroy, new(module_))
+        finalizer(LibMLIR.mlirModuleDestroy, new(module_, context))
     end
 end
 
-MModule(location::Location) = MModule(LibMLIR.mlirModuleCreateEmpty(location))
+MModule(context::Context, loc=Location(context)) =
+    MModule(LibMLIR.mlirModuleCreateEmpty(loc), context)
 get_operation(module_) = Operation(LibMLIR.mlirModuleGetOperation(module_), false)
 get_body(module_) = Block(LibMLIR.mlirModuleGetBody(module_), false)
 
@@ -539,5 +617,127 @@ end
 OpPassManager(pass::PassManager) = OpPassManager(LibMLIR.mlirPassManagerGetAsOpPassManager(pass), pass)
 
 Base.convert(::Type{MlirOpPassManager}, op_pass::OpPassManager) = op_pass.op_pass
+
+### Iterators
+
+"""
+    BlockIterator(region::Region)
+
+Iterates over all blocks in the given region.
+"""
+struct BlockIterator
+    region::Region
+end
+
+function Base.iterate(it::BlockIterator)
+    reg = it.region
+    raw_block = LibMLIR.mlirRegionGetFirstBlock(reg)
+    if LibMLIR.mlirBlockIsNull(raw_block)
+        nothing
+    else
+        b = Block(raw_block, false)
+        (b, b)
+    end
+end
+
+function Base.iterate(it::BlockIterator, block)
+    raw_block = LibMLIR.mlirBlockGetNextInRegion(block)
+    if LibMLIR.mlirBlockIsNull(raw_block)
+        nothing
+    else
+        b = Block(raw_block, false)
+        (b, b)
+    end
+end
+
+"""
+    OperationIterator(block::Block)
+
+Iterates over all operations for the given block.
+"""
+struct OperationIterator
+    block::Block
+end
+
+function Base.iterate(it::OperationIterator)
+    raw_op = LibMLIR.mlirBlockGetFirstOperation(it.block)
+    if LibMLIR.mlirOperationIsNull(raw_op)
+        nothing
+    else
+        op = Operation(raw_op, false)
+        (op, op)
+    end
+end
+
+function Base.iterate(it::OperationIterator, op)
+    raw_op = LibMLIR.mlirOperationGetNextInBlock(op)
+    if LibMLIR.mlirOperationIsNull(raw_op)
+        nothing
+    else
+        op = Operation(raw_op, false)
+        (op, op)
+    end
+end
+
+"""
+    RegionIterator(::Operation)
+
+Iterates over all sub-regions for the given operation.
+"""
+struct RegionIterator
+    op::Operation
+end
+
+function Base.iterate(it::RegionIterator)
+    raw_region = LibMLIR.mlirOperationGetFirstRegion(it.op)
+    if LibMLIR.mlirRegionIsNull(raw_region)
+        nothing
+    else
+        region = Region(raw_region, false)
+        (region, region)
+    end
+end
+
+function Base.iterate(it::RegionIterator, region)
+    raw_region = LibMLIR.mlirRegionGetNextInOperation(region)
+    if LibMLIR.mlirRegionIsNull(raw_region)
+        nothing
+    else
+        region = Region(raw_region, false)
+        (region, region)
+    end
+end
+
+### Utils
+
+function get_dialects!(dialects::Set{Symbol}, op::Operation)
+    push!(dialects, get_dialect(op))
+
+    for region in RegionIterator(op)
+        for block in BlockIterator(region)
+            for op in OperationIterator(block)
+                get_dialects!(dialects, op)
+            end
+        end
+    end
+
+    dialects
+end
+
+function get_input_type(module_)
+    dialects = Set{Symbol}()
+
+    op = get_operation(module_)
+    get_dialects!(dialects, op)
+
+    if :mhlo ∈ dialects
+        :tosa ∉ dialects || throw("cannot have both tosa and mhlo operations")
+        :mhlo
+    elseif :tosa ∈ dialects
+        :tosa
+    else
+        :none
+    end
+end
 
 end # module MLIR
