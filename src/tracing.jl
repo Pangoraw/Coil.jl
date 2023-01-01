@@ -1,3 +1,63 @@
+"""
+The Tracing module contains the code in charge of transforming provided
+functions to linearized tapes (using [Umlaut.jl](https://github.com/dfdx/Umlaut.jl))
+and then replacing lowerable calls from this tape to MLIR operations. Not all Julia
+calls can be replaced to MLIR operation (struct code, io, etc...). Therefore, the transformation produce a new
+tape where only tensor and arithmetic operations are lifted to MLIR.
+
+Consider this input tape of `Flux.Dense` layer with bias and a relu activation:
+
+```
+julia> import Coil.Tracing
+
+julia> dense = Dense(3, 6, relu)
+Dense(3 => 6, relu)  # 24 parameters
+
+julia> x = randn(Float32,3,1);
+
+julia> _, tape = Tracing.trace(dense, x; ctx=Tracing.Context(dense));
+
+julia> tape
+inp %1::Dense{typeof(relu), Matrix{Float32}, Vector{Float32}}
+  inp %2::Matrix{Float32}
+  const %3 = fast_act::typeof(NNlib.fast_act)
+  %4 = getproperty(%1, :σ)::typeof(relu) 
+  const %5 = nothing::Nothing
+  const %6 = +::typeof(+)
+  %7 = getproperty(%1, :weight)::Matrix{Float32} 
+  %8 = *(%7, %2)::Matrix{Float32} 
+  %9 = getproperty(%1, :bias)::Vector{Float32} 
+  %10 = broadcasted(%6, %8, %9)::Broadcasted{} 
+  %11 = broadcasted(%4, %10)::Broadcasted{} 
+  %12 = materialize(%11)::Matrix{Float32} 
+
+julia> Tracing.compile_tape(tape, x; verbose=true)
+[...]
+Tape{Coil.Tracing.Context}
+  inp %1::Dense{typeof(relu), Matrix{Float32}, Vector{Float32}}
+  inp %2::Matrix{Float32}
+  %3 = getproperty(%1, :weight)::Matrix{Float32} 
+  %4 = getproperty(%1, :bias)::Vector{Float32} 
+  %5 = Call(#= 3 => 1 =#)(%3, %2, %4)::Matrix{Float32} 
+```
+
+where the `Call` struct calls into the following generated function:
+
+```julia
+julia> Coil.@code_mlir dense(x)
+MModule:
+module {
+  func.func @Dense(%arg0: tensor<6x3xf32>, %arg1: tensor<3x1xf32>, %arg2: tensor<6xf32>) -> tensor<6x1xf32> {
+    %0 = "mhlo.dot"(%arg0, %arg1) : (tensor<6x3xf32>, tensor<3x1xf32>) -> tensor<6x1xf32>
+    %1 = "mhlo.broadcast_in_dim"(%arg2) {broadcast_dimensions = dense<0> : tensor<1xi64>} : (tensor<6xf32>) -> tensor<6x1xf32>
+    %2 = mhlo.add %0, %1 : tensor<6x1xf32>
+    %3 = tensor.empty() : tensor<6x1xf32>
+    %cst = arith.constant dense<0.000000e+00> : tensor<6x1xf32>
+    %3 = arith.maxf %2, %cst : tensor<6x1xf32>
+    return %3 : tensor<6x1xf32>
+  }
+}
+"""
 module Tracing
 
 import NNlib
@@ -5,10 +65,14 @@ using Umlaut
 using Umlaut: V
 
 import ..Coil
+
 using ..IREE
+using ..IREE: Call
+
 using ..MLIR
-import ..func, ..mhlo, ..arith, ..math, ..tensor, ..tosa, ..linalg, ..index
 import .MLIR: julia_type, get_result, get_type
+
+import ..func, ..mhlo, ..arith, ..math, ..tensor, ..tosa, ..linalg, ..index
 
 macro loc(ctx)
     source = QuoteNode(__source__)
@@ -146,9 +210,7 @@ function lower_call!(cg, ::OpConfig{typeof(NNlib.relu)}, op)
             arith.constant(mlir_ctx, zero(T); loc)
     )
 
-    fop = if MLIR.is_tensor(type)
-        tosa.maximum
-    elseif T <: AbstractFloat
+    fop = if T <: AbstractFloat
         arith.maxf
     elseif T <: Signed
         arith.maxsi
@@ -254,6 +316,21 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
 
         if f == identity
             ctx.operands[V(op)] = operand
+        elseif f == NNlib.relu
+            type = get_type(operand)
+            T = julia_type(eltype(type))
+            cst0 = push!(block, arith.constant(mlir_ctx, zeros(T), type; loc=Location(mlir_ctx, op.line)))
+            mop = if T <: AbstractFloat
+                arith.maxf
+            elseif T <: Unsigned
+                arith.maxui
+            elseif T <: Signed
+                arith.maxsi
+            else
+                throw("cannot compute max on element of type $T")
+            end
+            max0 = push!(block, mop(mlir_ctx, [operand, get_result(cst0, 1)]; loc=Location(mlir_ctx, op.line)))
+            ctx.operands[V(op)] = MLIR.get_result(max0, 1)
         elseif f ∈ math_unary_functions
             fname = nameof(f)
             fop = getproperty(math, fname)
@@ -530,7 +607,7 @@ function compile_to_module(tape, args...; verbose)
     m = which(ctx.f, typeof_args)
 
     mlir_ctx = MLIR.Context()
-    Coil.IREE.register_all_dialects!(mlir_ctx)
+    IREE.register_all_dialects!(mlir_ctx)
     for dialect in ("func", "mhlo", "arith", "math", "tosa", "linalg", "tensor")
         MLIR.get_or_load_dialect(mlir_ctx, dialect)
     end
@@ -594,7 +671,6 @@ function compile_tape(tape, args...; verbose=haskey(ENV, "COIL_VERBOSE"))
     verbose && display(tape)
 
     compiled_func = Umlaut.compile(tape)
-
     (args...) -> compiled_func(ctx.f, args...)
 end
 
@@ -622,37 +698,87 @@ function lower_tape!(cg)
     end
 end
 
-function compile(model; verbose=false)
-    compiled_model = nothing
+"""
+  compile(f; verbose::Bool=false, discard_first_outputs::Bool=false)
+
+Returns a compiled version of the provided function which will
+lazily be compiled + specialized on its arguments on the first call to this function.
+
+One can use `discard_first_outputs=true` to use return the result of the compiled function even
+on the first run where the Julia result is available because it has been computed during tracing.
+
+!!! note
+    Coil relies on [Umlaut.jl](https://github.com/dfdx/Umlaut.jl) for tracing the function
+    and therefore all control flow constructs are linearized using the arguments provided for
+    the first compilation.
+
+## Examples
+
+```julia
+julia> import Coil
+
+julia> f(x) = sqrt(sum(x .+ 2))
+f (generic function with 1 method)
+
+julia> compiled_f = Coil.compile(f)
+#29 (generic function with 1 method)
+
+julia> compiled_f(Float32[1.]) # triggers compilation
+1.7320508f0
+
+julia> f(Float32[2.])          # compare with Julia version
+2.0f0
+
+julia> compiled_f(Float32[2.]) # runs the compiled version
+2.0f0
+```
+"""
+function compile(f; verbose=false, discard_first_outputs=false)
+    compiled_f = nothing
     return (args...) -> begin
-        if isnothing(compiled_model)
+        if isnothing(compiled_f)
             # session = get_session()
-            # model = iree(session, model)
+            # f = iree(session, f)
 
-            ctx = Context(model)
+            ctx = Context(f)
 
-            out, tape = trace(model, args...; ctx)
+            out, tape = trace(f, args...; ctx)
             verbose && display(tape)
 
-            compiled_model = compile_tape(tape, args...; verbose)
+            compiled_f = compile_tape(tape, args...; verbose)
 
-            out
+            if discard_first_outputs
+                compiled_f(args...)
+            else
+                out
+            end
         else
-            compiled_model(args...)
+            compiled_f(args...)
         end
     end
 end
 
+"""
+    @code_mlir f(args...)
+
+Returns the "func.func" operation generated from the provided function
+and arguments. This helper is useful to investigate the generated code
+from `Coil.compile`.
+"""
 macro code_mlir(call)
     Meta.isexpr(call, :call) || throw("expected call Expr")
     quote
-        f = $(esc(first(call.args)))
-        args = $(esc(Expr(:vect, call.args[begin+1:end]...)))
-        ctx = Context(f)
-        _, tape = trace(f, args...; ctx)
-        compile_to_module(tape, args...; verbose=false)
+        let
+            f = $(esc(first(call.args)))
+            args = $(esc(Expr(:vect, call.args[begin+1:end]...)))
+            ctx = Context(f)
+            _, tape = trace(f, args...; ctx)
+            compile_to_module(tape, args...; verbose=false)
+        end
     end
 end
+
+### Compile utils
 
 function compile_to_bytecode(ctx, module_; input_type=MLIR.get_input_type(module_))
     input_type ∈ (
@@ -738,6 +864,8 @@ function simplify_tape!(tape)
 
     tape
 end
+
+### Functors stuff
 
 import Adapt, Functors
 
