@@ -25,7 +25,19 @@ import ..MLIR
 using .Compiler:
     IreeCompilerOptions
 
-register_all_dialects!(context) = Compiler.ireeCompilerRegisterAllDialects(context)
+const iree_registered_targets_and_passes = Ref(false)
+
+function register_all_dialects!(context)
+    if !iree_registered_targets_and_passes[]
+        Compiler.ireeCompilerRegisterTargetBackends()
+        Compiler.ireeCompilerRegisterAllPasses()
+        iree_registered_targets_and_passes[] = true
+    end
+
+    Compiler.ireeCompilerRegisterAllDialects(context)
+
+    context
+end
 
 mutable struct CompilerOptions
     options::IreeCompilerOptions
@@ -37,8 +49,6 @@ mutable struct CompilerOptions
     end
 end
 
-const iree_registered_targets_and_passes = Ref(false)
-
 CompilerOptions(flags) = begin
     if !iree_registered_targets_and_passes[]
         Compiler.ireeCompilerRegisterTargetBackends()
@@ -47,9 +57,20 @@ CompilerOptions(flags) = begin
     end
 
     options = CompilerOptions(Compiler.ireeCompilerOptionsCreate())
-    result = Compiler.ireeCompilerOptionsSetFlags(options, length(flags), flags, C_NULL, C_NULL)
+
+    io = IOBuffer()
+    c_print_callback = @cfunction(MLIR.print_callback, Cvoid, (MLIR.MlirStringRef, Any))
+    ref = Ref(io)
+
+    result = GC.@preserve ref Compiler.ireeCompilerOptionsSetFlags(
+        options,
+        length(flags), flags,
+        c_print_callback, Base.pointer_from_objref(ref),
+    )
+
     if MLIR.LibMLIR.mlirLogicalResultIsFailure(result)
-        throw("failed to create CompilerOptions")
+        msg = String(take!(io))
+        throw("failed to create CompilerOptions: $msg")
     end
 
     return options

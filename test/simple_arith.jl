@@ -87,3 +87,12 @@ end
     @test cf(a) == f(a)
     @test cf(a) == f(a)
 end
+
+@testset "Tracing: binary operators" begin
+    f(x, y) = x .+ y
+    cf = Coil.compile(f; verbose=false)
+
+    x = randn(Float32, 3, 3)
+    y = randn(Float32, 3, 3)
+    @test cf(x, y) ≈ cf(x, y)
+end

@@ -74,16 +74,26 @@ function extf(context, operand, type; loc=Location(context))
     Operation(state)
 end
 
-function sitofp(context, operand, ftype=float(MLIR.julia_type(MLIR.get_type(operand))); loc=Location(context))
+function sitofp(context, operand, ftype=float(julia_type(eltype(get_type(operand)))); loc=Location(context))
     state = OperationState("arith.sitofp", loc)
-    MLIR.add_results!(state, [MType(context, ftype)])
+    type = get_type(operand)
+    MLIR.add_results!(state, [
+        MLIR.is_tensor(type) ?
+        MType(context, ftype isa MType ? eltype(ftype) : MType(context, ftype), size(type)) :
+        MType(context, ftype)
+    ])
     MLIR.add_operands!(state, [operand])
     Operation(state)
 end
 
 function fptosi(context, operand, itype; loc=Location(context))
     state = OperationState("arith.fptosi", loc)
-    MLIR.add_results!(state, [MType(context, itype)])
+    type = get_type(operand)
+    MLIR.add_results!(state, [
+        MLIR.is_tensor(type) ?
+        MType(context, itype isa MType ? itype : MType(context, itype), size(type)) :
+        MType(context, itype)
+    ])
     MLIR.add_operands!(state, [operand])
     Operation(state)
 end
@@ -202,6 +212,19 @@ function yield(context, operand; loc=Location(context))
     Operation(state)
 end
 
+function fill(context, operands...; loc=Location(context))
+    state = OperationState("linalg.fill", loc)
+    # MLIR.enable_type_inference!(state)
+    add_owned_regions!(state, [Region()])
+    add_operands!(state, collect(operands))
+    add_results!(state, [get_type(last(operands))])
+    add_attributes!(state, [
+        NamedAttribute(context, "operand_segment_sizes",
+            Attribute(context, collect(Int32.(length.(size.(get_type.(operands)))))))
+    ])
+    Operation(state)
+end
+
 end # module linalg
 
 module tensor
@@ -297,18 +320,18 @@ function convolution(context, output_type, operands; loc=Location(context))
               input_feature_dimension = 2,
               input_spatial_dimensions = [0, 1],
               kernel_input_feature_dimension = 2,
-              kernel_output_feature_dimension = 2,
+              kernel_output_feature_dimension = 3,
               kernel_spatial_dimensions = [0, 1],
               output_batch_dimension = 3,
               output_feature_dimension = 2,
-              output_spatial_dimensions = [0, 1]
+              output_spatial_dimensions = [0, 1],
             >
             """
         )),
         NamedAttribute(context, "feature_group_count", Attribute(context, 1)),
         NamedAttribute(context, "padding", Attribute(context, zeros(Int64, 2, 2))),
-        NamedAttribute(context, "rhs_dilation", Attribute(context, [1])),
-        NamedAttribute(context, "window_strides", Attribute(context, [1])),
+        NamedAttribute(context, "rhs_dilation", Attribute(context, [1, 1])),
+        NamedAttribute(context, "window_strides", Attribute(context, [1, 1])),
     ])
     #=
     batch_group_count = 1 : i64,

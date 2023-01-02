@@ -121,6 +121,14 @@ Location(context::Context, ::Nothing) = Location(context)
 
 Base.convert(::Type{MlirLocation}, location::Location) = location.location
 
+function Base.show(io::IO, location::Location)
+    c_print_callback = @cfunction(print_callback, Cvoid, (MlirStringRef, Any))
+    ref = Ref(io)
+    print(io, "Location(#= ")
+    GC.@preserve ref LibMLIR.mlirLocationPrint(location, c_print_callback, ref)
+    print(io, " =#)")
+end
+
 ### Type
 
 struct MType
@@ -190,7 +198,7 @@ function show_inner(io::IO, type::MType)
         else
             "u"
         end
-        print(io, string(t, width))
+        print(io, t, width)
     elseif LibMLIR.mlirTypeIsAF64(type)
         print(io, "f64")
     elseif LibMLIR.mlirTypeIsAF32(type)
@@ -201,6 +209,8 @@ function show_inner(io::IO, type::MType)
         print(io, join(s, "x"), "x")
         show_inner(io, eltype(type))
         print(io, ">")
+    elseif LibMLIR.mlirTypeIsAIndex(type)
+        print(io, "index")
     else
         print(io, "unknown")
     end
@@ -256,16 +266,8 @@ Base.ndims(type::MType) =
         0
     end
 
-function Base.size(type::MType)
-    if LibMLIR.mlirTypeIsAShaped(type) && LibMLIR.mlirShapedTypeHasRank(type)
-        Tuple(
-            LibMLIR.mlirShapedTypeGetDimSize(type, i - 1)
-            for i in 1:LibMLIR.mlirShapedTypeGetRank(type)
-        )
-    else
-        ()
-    end
-end
+Base.size(type::MType, i::Int) = LibMLIR.mlirShapedTypeGetDimSize(type, i - 1)
+Base.size(type::MType) = Tuple(size(type, i) for i in 1:ndims(type))
 
 function is_tensor(type::MType)
     LibMLIR.mlirTypeIsAShaped(type)
@@ -293,10 +295,22 @@ Attribute(context, f::Float64) = Attribute(
 Attribute(context, i::T) where {T<:Integer} = Attribute(
     LibMLIR.mlirIntegerAttrGet(MType(context, T), Int64(i))
 )
+function Attribute(context, values::T) where {T<:AbstractArray{Int32}}
+    type = MType(context, T, size(values))
+    Attribute(
+        LibMLIR.mlirDenseElementsAttrInt32Get(type, length(values), values)
+    )
+end
 function Attribute(context, values::T) where {T<:AbstractArray{Int64}}
     type = MType(context, T, size(values))
     Attribute(
         LibMLIR.mlirDenseElementsAttrInt64Get(type, length(values), values)
+    )
+end
+function Attribute(context, values::T) where {T<:AbstractArray{Float64}}
+    type = MType(context, T, size(values))
+    Attribute(
+        LibMLIR.mlirDenseElementsAttrDoubleGet(type, length(values), values)
     )
 end
 function Attribute(context, values::T) where {T<:AbstractArray{Float32}}
@@ -572,6 +586,7 @@ get_operation(module_) = Operation(LibMLIR.mlirModuleGetOperation(module_), fals
 get_body(module_) = Block(LibMLIR.mlirModuleGetBody(module_), false)
 
 Base.convert(::Type{MlirModule}, module_::MModule) = module_.module_
+Base.parse(::Type{MModule}, context, module_) = MModule(LibMLIR.mlirModuleCreateParse(context, module_), context)
 
 function Base.show(io::IO, module_::MModule)
     println(io, "MModule:")
@@ -582,16 +597,24 @@ end
 
 mutable struct PassManager
     pass::MlirPassManager
+    context::Context
 
-    PassManager(pass::MlirPassManager) = begin
+    PassManager(pass::MlirPassManager, context) = begin
         @assert !LibMLIR.mlirPassManagerIsNull(pass) "cannot create PassManager with null MlirPassManager"
-        finalizer(new(pass)) do pass
+        finalizer(new(pass, context)) do pass
             LibMLIR.mlirPassManagerDestroy(pass.pass)
         end
     end
 end
 
-PassManager(context) = PassManager(LibMLIR.mlirPassManagerCreate(context))
+function enable_verifier!(pass)
+    LibMLIR.mlirPassManagerEnableVerifier(pass)
+    pass
+end
+
+PassManager(context) =
+    PassManager(LibMLIR.mlirPassManagerCreate(context), context)
+
 function run(pass, module_)
     status = LibMLIR.mlirPassManagerRun(pass, module_)
     if LibMLIR.mlirLogicalResultIsFailure(status)
@@ -617,6 +640,26 @@ end
 OpPassManager(pass::PassManager) = OpPassManager(LibMLIR.mlirPassManagerGetAsOpPassManager(pass), pass)
 
 Base.convert(::Type{MlirOpPassManager}, op_pass::OpPassManager) = op_pass.op_pass
+
+function Base.show(io::IO, op_pass::OpPassManager)
+    c_print_callback = @cfunction(print_callback, Cvoid, (MlirStringRef, Any))
+    ref = Ref(io)
+    println(io, "OpPassManager(\"\"\"")
+    GC.@preserve ref LibMLIR.mlirPrintPassPipeline(op_pass, c_print_callback, ref)
+    println(io)
+    print(io, "\"\"\")")
+end
+
+function add_pipeline!(op_pass::OpPassManager, pipeline)
+    io = IOBuffer()
+    c_print_callback = @cfunction(print_callback, Cvoid, (MlirStringRef, Any))
+    result = GC.@preserve io LibMLIR.mlirOpPassManagerAddPipeline(op_pass, pipeline, c_print_callback, io)
+    if LibMLIR.mlirLogicalResultIsFailure(result)
+        msg = String(take!(io))
+        throw("failed to add pipeline: $msg")
+    end
+    op_pass
+end
 
 ### Iterators
 

@@ -110,32 +110,34 @@ Context(f) = Context(
 _not_a_primitive() = nothing
 
 function Umlaut.isprimitive(::Context, f, args...)
-    # Check if lower_call! has a specialization
-    if which(lower_call!, (Any,OpConfig{typeof(f)},Umlaut.Call)) !=
-            which(lower_call!, (Any,OpConfig{typeof(_not_a_primitive)},Any))
-        return true
-    end
-
-    return Umlaut.isprimitive(Umlaut.BaseCtx(), f, args...)
-end
-
-struct CompiledModel
-    inputs::Vector{SymTensor}
-    model::Any
+    Umlaut.isprimitive(Umlaut.BaseCtx(), f, args...) ||
+        which(lower_call!, (Any, OpConfig{typeof(f)}, Umlaut.Call)) !=
+        which(lower_call!, (Any, OpConfig{typeof(_not_a_primitive)}, Umlaut.Call))
 end
 
 function is_tensor(tape::Tape{Context}, v::Umlaut.Variable)
+    ctx = tape.c
     v = bound(tape, v)
-    haskey(tape.c.shapes, v)
+    haskey(ctx.operands, v) &&
+        MLIR.is_tensor(get_type(ctx.operands[v]))
+    # v = bound(tape, v)
+    # haskey(tape.c.shapes, v)
 end
 is_tensor(_, other) = false
 
 struct OpConfig{F} end
 
+macro op_config_kw(f)
+    quote
+        OpConfig{<:Union{typeof($(esc(f))),Core.kwftype($(esc(f)))}}
+    end
+end
+
 struct CodegenContext
     mlir_ctx::MLIR.Context
     block::Block
     tape::Tape{Context}
+    verbose::Bool
 end
 
 function to_loc(mlir_ctx, line)
@@ -190,13 +192,42 @@ function add_arg!(cg::CodegenContext, val, operand)
     val
 end
 
-function lower_call!(cg, ::OpConfig{F}, op) where {F}
-    @warn "skipping lowering of $(nameof(F))"
+function generic_lower_call(cg, ::OpConfig{F}, op) where {F}
+    cg.verbose && @warn "skipping lowering of $(nameof(F))"
     nothing
 end
+
+struct KwCall{T} <: Umlaut.AbstractOp
+    call::Umlaut.Call{T}
+    kwargs::NamedTuple
+end
+
+function Base.getproperty(kwcall::KwCall, f::Symbol)
+    f ∈ (:kwargs, :call) && return getfield(kwcall, f)
+    Base.getproperty(kwcall.call, f)
+end
+
+function to_vkwargs(tape, arg)
+    b = tape[arg]
+    T = b.typ
+    names = first(T.parameters)
+    n = length(names)
+    args = tape[b.args[1]].args
+    NamedTuple{names,NTuple{n,Any}}(args)
+end
+
+function lower_call!(cg, config::OpConfig, op)
+    generic_lower_call(cg, config, op)
+    nothing
+end
+function lower_call!(cg, ::OpConfig{typeof(Core.kwcall)}, op::Umlaut.Call{T}) where {T}
+    f = value(op.args[2])
+    kwargs = to_vkwargs(cg.tape, first(op.args))
+    op.args = op.args[3:end]
+    lower_call!(cg, OpConfig{typeof(f)}(), KwCall{T}(op, kwargs))
+end
 function lower_call!(cg, ::OpConfig{typeof(NNlib.relu)}, op)
-    (; mlir_ctx, block, tape) = cg
-    ctx = tape.c
+    (; mlir_ctx, block) = cg
 
     operand = get_arg_operand!(cg, only(op.args); cst_op=mhlo.constant)
     type = MLIR.get_type(operand)
@@ -206,8 +237,8 @@ function lower_call!(cg, ::OpConfig{typeof(NNlib.relu)}, op)
     cst0 = push!(
         block,
         MLIR.is_tensor(type) ?
-            arith.constant(mlir_ctx, zeros(T), type; loc) :
-            arith.constant(mlir_ctx, zero(T); loc)
+        arith.constant(mlir_ctx, zeros(T), type; loc) :
+        arith.constant(mlir_ctx, zero(T); loc)
     )
 
     fop = if T <: AbstractFloat
@@ -221,15 +252,16 @@ function lower_call!(cg, ::OpConfig{typeof(NNlib.relu)}, op)
     end
 
     push!(block, fop(mlir_ctx, [
-        MLIR.get_result(cst0, 1),
-        operand,
-    ]; loc))
+            MLIR.get_result(cst0, 1),
+            operand,
+        ]; loc))
 end
-function lower_call!(cg, ::OpConfig{typeof(getindex)}, op)
-    (; mlir_ctx, block, tape) = cg
+function lower_call!(cg, config::OpConfig{typeof(getindex)}, op)
+    (; mlir_ctx, block) = cg
 
-    if !is_tensor(tape, first(op.args)) || length(op.args) != 2
-        return
+    if length(op.args) != 2
+        @warn "skipping getindex"
+        return generic_lower_call(cg, config, op)
     end
 
     x = get_arg_operand!(cg, first(op.args); cst_op=mhlo.constant)
@@ -241,10 +273,82 @@ function lower_call!(cg, ::OpConfig{typeof(getindex)}, op)
     cst1 = push!(block, arith.constant(mlir_ctx, one(T)))
     zerobased0 = push!(block, arith.subi(mlir_ctx, [i, get_result(cst1, 1)]))
     index0 = push!(block, arith.index_cast(mlir_ctx, get_result(zerobased0, 1); loc=@loc(mlir_ctx)))
+
     push!(block, tensor.extract(mlir_ctx, x, get_result(index0, 1)))
 end
-function lower_call!(cg, ::OpConfig{typeof(sum)}, op)
+function lower_call!(cg, ::OpConfig{typeof(map)}, op)
     (; mlir_ctx, block) = cg
+
+    fmap = value(op.args[1])
+    # fred = value(op.args[2])
+    @assert length(op.args) == 2
+
+    operand = get_arg_operand!(cg, op.args[2]; cst_op=arith.constant)
+    type = get_type(operand)
+
+    val = first(value(op.args[2]))
+
+    unary_ctx = Context(fmap)
+    _, unary_tape = _trace(fmap, val; ctx=unary_ctx)
+
+    inner_block = Block(MType[], Location[])
+    unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose)
+
+    lower_tape!(unary_cg)
+
+    push!(inner_block, linalg.yield(mlir_ctx, unary_ctx.operands[unary_tape.result]; loc=@loc(mlir_ctx)))
+
+    out0 = push!(block, tensor.empty(mlir_ctx, type; loc=@loc(mlir_ctx)))
+    push!(block, linalg.map(mlir_ctx, inner_block, operand, get_result(out0, 1); loc=Location(mlir_ctx, op.line)))
+end
+function lower_call!(cg, ::OpConfig{typeof(mapreduce)}, op)
+    (; mlir_ctx, block) = cg
+
+    fmap = value(op.args[1])
+    fred = value(op.args[2])
+    @assert length(op.args) == 3
+
+    fmapreduce = (a, b) -> fred(fmap(a), b)
+
+    operand = get_arg_operand!(cg, op.args[3]; cst_op=mhlo.constant)
+    type = get_type(operand)
+    init_operand = get_arg_operand!(cg, op.kwargs.init; cst_op=mhlo.constant)
+
+    valx = first(value(op.args[3]))
+    init = op.kwargs.init
+    vali = value(init)
+
+    if !(vali isa AbstractArray)
+        empty0 = push!(block, tensor.empty(mlir_ctx,
+            MType(mlir_ctx, eltype(get_type(init_operand)), ()); loc=@loc(mlir_ctx)))
+        fill0 = push!(block, linalg.fill(mlir_ctx, init_operand, get_result(empty0, 1); loc=@loc(mlir_ctx)))
+        init_operand = get_result(fill0, 1)
+    end
+
+    _, unary_tape = _trace(fmapreduce, valx, vali)
+    tensorize!(unary_tape)
+
+    inner_block = Block(MType[], Location[])
+    unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose)
+
+    lower_tape!(unary_cg)
+    unary_ctx = unary_tape.c
+
+    push!(inner_block, mhlo.return_(mlir_ctx, unary_ctx.operands[unary_tape.result]))
+
+    reduce0 = push!(block, mhlo.reduce(
+        mlir_ctx, inner_block,
+        [operand, init_operand],
+        1:ndims(type); loc=Location(mlir_ctx, op.line)
+    ))
+    cst0 = push!(block, arith.constant(mlir_ctx, 0; loc=@loc(mlir_ctx)))
+    index0 = push!(block, arith.index_cast(mlir_ctx, get_result(cst0, 1); loc=@loc(mlir_ctx)))
+    reshape0 = push!(block, mhlo.reshape(mlir_ctx, get_result(reduce0, 1), (1,); loc=@loc(mlir_ctx)))
+    push!(block, tensor.extract(mlir_ctx, get_result(reshape0, 1), get_result(index0, 1); loc=@loc(mlir_ctx)))
+end
+function lower_call!(cg, ::OpConfig{typeof(sum)}, op)
+    (; mlir_ctx, block, tape) = cg
+    ctx = tape.c
 
     @assert length(op.args) == 1 "unsupported multi-arguments sum"
 
@@ -285,24 +389,41 @@ function lower_call!(cg, ::OpConfig{typeof(sum)}, op)
     cst0 = push!(block, arith.constant(mlir_ctx, 0; loc=@loc(mlir_ctx)))
     index0 = push!(block, arith.index_cast(mlir_ctx, get_result(cst0, 1); loc=@loc(mlir_ctx)))
 
-    push!(block, tensor.extract(mlir_ctx, get_result(reshape2, 1), get_result(index0, 1); loc=@loc(mlir_ctx)))
+    extract0 = push!(block, tensor.extract(mlir_ctx, get_result(reshape2, 1), get_result(index0, 1); loc=@loc(mlir_ctx)))
+    ctx.operands[V(op)] = get_result(extract0, 1)
 end
 function lower_call!(cg, ::OpConfig{typeof(NNlib.conv)}, op)
     (; mlir_ctx, block, tape) = cg
     ctx = tape.c
 
+    @assert length(op.args) == 3 "lowering NNlib.conv: currently only supported conv(::AbstractArray, ::AbstractArray, ::DenseConvDims)"
     operands = get_arg_operands!(cg, op, op.args[begin:end-1])
 
-    output_type = MLIR.get_type(first(operands))
-    conv0 = push!(block, mhlo.convolution(mlir_ctx, output_type, operands))
+    input_type = MLIR.get_type(first(operands))
+    weight_type = MLIR.get_type(last(operands))
+    W, H, _, B = size(input_type)
 
-    ctx.operands[V(op)] = MLIR.get_result(conv0, 1)
+    cdims = value(op.args[end])
+    @assert cdims isa NNlib.DenseConvDims "lowering NNlib.conv: unsupported convolution type $(typeof(cdims))"
+
+    kw, kh = cdims.kernel_size
+    pw, ph, _, _ = cdims.padding
+    dw, dh = cdims.dilation
+    sw, sh = cdims.stride
+
+    h_out = (H + 2 * ph - dh * (kh - 1) - 1) ÷ sh + 1
+    w_out = (W + 2 * pw - dw * (kw - 1) - 1) ÷ sw + 1
+    c_out = size(weight_type, 4)
+    output_size = (w_out, h_out, c_out, B)
+    output_type = MType(mlir_ctx, eltype(input_type), output_size)
+
+    conv0 = push!(block, mhlo.convolution(mlir_ctx, output_type, operands))
+    ctx.operands[V(op)] = get_result(conv0, 1)
 end
 function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.materialize)}, op)
     (; tape) = cg
     ctx = tape.c
-    ctx.operands[V(op)] =
-        ctx.operands[first(op.args)]
+    ctx.operands[V(op)] = get_arg_operand!(cg, first(op.args); cst_op=mhlo.constant)
     nothing
 end
 function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
@@ -345,15 +466,15 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
             inner_block = Block(MType[], Location[])
 
             unary_ctx = Context(f)
-            if Umlaut.isprimitive(unary_ctx, f, val)
+            if false && Umlaut.isprimitive(unary_ctx, f, val)
                 unary_tape = Umlaut.Tape(unary_ctx)
                 arg0 = push!(unary_tape, Umlaut.Input(val))
                 unary_tape.result = push!(unary_tape, mkcall(f, arg0; val=f(val), line=op.line))
             else
-                _, unary_tape = trace(f, val; ctx=unary_ctx)
+                _, unary_tape = _trace(f, val; ctx=unary_ctx)
             end
 
-            unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape)
+            unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose)
             lower_tape!(unary_cg)
 
             ret_operand = unary_ctx.operands[unary_tape.result]
@@ -373,15 +494,16 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
         return
     end
 
-    input_shapes = [size(value(arg)) for arg in op.args[begin+1:end]]
-
-    out_shape = Base.Broadcast.broadcast_shape(input_shapes...)
     operands = get_arg_operands!(cg, op, @view(op.args[begin+1:end]))
+
+    input_types = [get_type(operand) for operand in operands]
+    input_shapes = [size(type) for type in input_types]
     element_types = [
-        julia_type(eltype(get_type(operand)))
-        for operand in operands
+        julia_type(eltype(input_type))
+        for input_type in input_types
     ]
     out_element_type = Base.promote_type(element_types...)
+    out_shape = Base.Broadcast.broadcast_shape(input_shapes...)
 
     operands = map(operands) do operand
         type = MLIR.get_type(operand)
@@ -471,7 +593,7 @@ end
 function lower_arith!(cg, op)
     (; mlir_ctx, block, tape) = cg
     ctx = tape.c
-    f = op.fn
+    f = value(op.fn)
 
     operands = get_arg_operands!(cg, op; cst_op=arith.constant)
     mop = push!(block, gen_arith!(cg, f, operands; loc=Location(mlir_ctx, op.line)))
@@ -503,7 +625,7 @@ function gen_arith!(cg, f, operands; loc=Location(cg.mlir_ctx))
     end
     @assert length(operands) == 2
 
-    is_integer = all(operand -> MLIR.is_integer(MLIR.get_type(operand)), operands)
+    is_integer = all(operand -> MLIR.is_integer(eltype(get_type(operand))), operands)
     if is_integer && f == /
         # cast operands to floats
         operands = map(operands) do operand
@@ -514,8 +636,8 @@ function gen_arith!(cg, f, operands; loc=Location(cg.mlir_ctx))
     end
 
     a, b = operands
-    Ta = julia_type(get_type(a))
-    Tb = julia_type(get_type(b))
+    Ta = julia_type(eltype(get_type(a)))
+    Tb = julia_type(eltype(get_type(b)))
     T = Base.promote_type(Ta, Tb)
 
     a = _convertto!(mlir_ctx, block, a, Ta, T)
@@ -608,7 +730,7 @@ function compile_to_module(tape, args...; verbose)
 
     mlir_ctx = MLIR.Context()
     IREE.register_all_dialects!(mlir_ctx)
-    for dialect in ("func", "mhlo", "arith", "math", "tosa", "linalg", "tensor")
+    for dialect in ("builtin", "func", "mhlo", "arith", "math", "tosa", "linalg", "tensor")
         MLIR.get_or_load_dialect(mlir_ctx, dialect)
     end
 
@@ -619,7 +741,7 @@ function compile_to_module(tape, args...; verbose)
 
     block = Block(MType[], Location[])
 
-    cg_context = CodegenContext(mlir_ctx, block, tape)
+    cg_context = CodegenContext(mlir_ctx, block, tape, verbose)
     lower_tape!(cg_context)
 
     result_types = [MLIR.get_type(ctx.operands[bound(tape, tape.result)])]
@@ -645,7 +767,7 @@ function compile_to_module(tape, args...; verbose)
     funcop = Operation(mlir_func_state)
     push!(mlir_module_body, funcop)
 
-    verbose && show(IOContext(stdout, :debug => false), funcop)
+    verbose && show(IOContext(stdout, :debug => true), funcop)
 
     return mlir_module
 end
@@ -655,9 +777,7 @@ function compile_tape(tape, args...; verbose=haskey(ENV, "COIL_VERBOSE"))
     func_name = ctx.f isa Function ? nameof(ctx.f) : nameof(typeof(ctx.f))
 
     mlir_module = compile_to_module(tape, args...; verbose)
-    mlir_ctx = mlir_module.context
-
-    graph_call = get_call(mlir_ctx, mlir_module, string("module.", func_name))
+    graph_call = get_call(mlir_module, string("module.", func_name))
 
     result_op = tape[tape.result]
     graph_call_op = Umlaut.mkcall(graph_call, ctx.block_args...; val=result_op.val)
@@ -696,6 +816,24 @@ function lower_tape!(cg)
             end
         end
     end
+end
+
+"""
+    _trace(f, args...; ctx)
+
+Wraps `Umlaut.trace` but does not recurse into the provided function
+if it is a primitive and replace and instead make it such that the function
+wraps the primitive instead.
+"""
+function _trace(f, args...; ctx=Context(f))
+    if Umlaut.isprimitive(ctx, f, args...)
+        out = f(args...)
+        tape = Umlaut.Tape(ctx)
+        vargs = map(arg -> push!(tape, Umlaut.Input(arg)), args)
+        tape.result = Umlaut.record_primitive!(tape, f, vargs...)
+        return out, tape
+    end
+    Umlaut.trace(f, args...; ctx)
 end
 
 """
@@ -742,7 +880,7 @@ function compile(f; verbose=false, discard_first_outputs=false)
 
             ctx = Context(f)
 
-            out, tape = trace(f, args...; ctx)
+            out, tape = _trace(f, args...; ctx)
             verbose && display(tape)
 
             compiled_f = compile_tape(tape, args...; verbose)
@@ -754,6 +892,19 @@ function compile(f; verbose=false, discard_first_outputs=false)
             end
         else
             compiled_f(args...)
+        end
+    end
+end
+
+macro tape(call)
+    Meta.isexpr(call, :call) || throw("expected call Expr")
+    quote
+        let
+            f = $(esc(first(call.args)))
+            args = $(esc(Expr(:vect, call.args[begin+1:end]...)))
+            ctx = Context(f)
+            _, tape = _trace(f, args...; ctx)
+            tape
         end
     end
 end
@@ -772,15 +923,55 @@ macro code_mlir(call)
             f = $(esc(first(call.args)))
             args = $(esc(Expr(:vect, call.args[begin+1:end]...)))
             ctx = Context(f)
-            _, tape = trace(f, args...; ctx)
+            _, tape = _trace(f, args...; ctx)
             compile_to_module(tape, args...; verbose=false)
         end
     end
 end
 
+"""
+    @code_linalg f(args...)
+
+Similar to `@code_mlir` but with with the dialect translation option
+enabled "iree-mhlo-to-linalg-on-tensors".
+"""
+macro code_linalg(call)
+    Meta.isexpr(call, :call) || throw("expected call Expr")
+    quote
+        let
+            f = $(esc(first(call.args)))
+            args = $(esc(Expr(:vect, call.args[begin+1:end]...)))
+            ctx = Context(f)
+            _, tape = _trace(f, args...; ctx)
+            module_ = compile_to_module(tape, args...; verbose=false)
+            lower_to_linalg!(module_)
+        end
+    end
+end
+
+function run_pipeline!(module_, pipeline)
+    IREE.register_all_dialects!(module_.context)
+
+    pass = MLIR.PassManager(module_.context)
+    MLIR.enable_verifier!(pass)
+
+    op_pass = MLIR.OpPassManager(pass)
+    MLIR.add_pipeline!(op_pass, pipeline)
+
+    MLIR.run(pass, module_)
+    module_
+end
+
+function lower_to_linalg!(module_)
+    run_pipeline!(module_, "iree-mhlo-to-linalg-on-tensors")
+end
+
+with_debug(val) = with_debug(stdout, val)
+with_debug(io::IO, val) = show(IOContext(io, :debug => true), val)
+
 ### Compile utils
 
-function compile_to_bytecode(ctx, module_; input_type=MLIR.get_input_type(module_))
+function compile_to_bytecode(module_; input_type=MLIR.get_input_type(module_))
     input_type ∈ (
         :none,
         :mhlo,
@@ -789,7 +980,7 @@ function compile_to_bytecode(ctx, module_; input_type=MLIR.get_input_type(module
         :tosa,
     ) || throw("invalid iree input type ($input_type)")
 
-    pass = MLIR.PassManager(ctx)
+    pass = MLIR.PassManager(module_.context)
     op_pass = MLIR.OpPassManager(pass)
     options = IREE.CompilerOptions([
         "--iree-hal-target-backends=llvm-cpu",
@@ -810,8 +1001,8 @@ function get_session()
     IREE.Session(instance, session_options, device)
 end
 
-function get_call(ctx, module_, name)
-    bytecode = compile_to_bytecode(ctx, module_)
+function get_call(module_, name)
+    bytecode = compile_to_bytecode(module_)
     session = get_session()
 
     IREE.append_bytecode!(session, bytecode)
@@ -863,6 +1054,31 @@ function simplify_tape!(tape)
     end
 
     tape
+end
+
+"""
+Tries to replace a tape that would generate `(Ta, Tb) -> Tc` to
+`(tensor<Ta>, tensor<Tb>) -> tensor<Tc>`.
+"""
+function tensorize!(tape)
+    for op in tape
+        if op isa Umlaut.Input && op.typ <: Real
+            op.val = fill(op.val)
+            @assert op.typ <: AbstractArray
+            continue
+        end
+
+        if op isa Umlaut.Const && op.typ <: Real
+            op.val = fill(op.val)
+            @assert op.typ <: AbstractArray
+            continue
+        end
+
+        if op isa Umlaut.Call && op.typ <: Real
+            op.val = fill(op.val)
+            continue
+        end
+    end
 end
 
 ### Functors stuff

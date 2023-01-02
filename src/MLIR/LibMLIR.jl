@@ -89,7 +89,7 @@ mlirDialectGetContext(dialect) = @ccall libmlir.mlirDialectGetContext(dialect::M
 
 mlirLocationIsNull(location) = mlirIsNull(location)
 mlirLocationPrint(location, callback, userdata) =
-    @ccall libmlir.mlirLocationPrint(location::MlirLocation, callback::Ptr{Cvoid}, userdata::Ptr{Cvoid})::Cvoid
+    @ccall libmlir.mlirLocationPrint(location::MlirLocation, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
 mlirLocationUnknownGet(context) = @ccall libmlir.mlirLocationUnknownGet(context::MlirContext)::MlirLocation
 mlirLocationFileLineColGet(context, filename, line, column) =
     @ccall libmlir.mlirLocationFileLineColGet(
@@ -125,7 +125,7 @@ mlirShapedTypeHasRank(type) =
     @ccall libmlir.mlirShapedTypeHasRank(type::MlirType)::Bool
 mlirShapedTypeGetRank(type) =
     @ccall libmlir.mlirShapedTypeGetRank(type::MlirType)::Int64
-mlirShapedTypeGetElementType(type) = 
+mlirShapedTypeGetElementType(type) =
     @ccall libmlir.mlirShapedTypeGetElementType(type::MlirType)::MlirType
 mlirTypeIsARankedTensor(type) =
     @ccall libmlir.mlirTypeIsARankedTensor(type::MlirType)::Bool
@@ -133,9 +133,9 @@ mlirTypeIsAShaped(type) =
     @ccall libmlir.mlirTypeIsAShaped(type::MlirType)::Bool
 mlirIntegerTypeGetWidth(type) =
     @ccall libmlir.mlirIntegerTypeGetWidth(type::MlirType)::UInt32
-mlirIntegerTypeIsSignless(type)=
+mlirIntegerTypeIsSignless(type) =
     @ccall libmlir.mlirIntegerTypeIsSignless(type::MlirType)::Bool
-mlirIntegerTypeIsSigned(type)=
+mlirIntegerTypeIsSigned(type) =
     @ccall libmlir.mlirIntegerTypeIsSigned(type::MlirType)::Bool
 mlirTypeIsAInteger(type) =
     @ccall libmlir.mlirTypeIsAInteger(type::MlirType)::Bool
@@ -143,6 +143,8 @@ mlirTypeIsAF32(type) =
     @ccall libmlir.mlirTypeIsAF32(type::MlirType)::Bool
 mlirTypeIsAF64(type) =
     @ccall libmlir.mlirTypeIsAF64(type::MlirType)::Bool
+mlirTypeIsAIndex(type) =
+    @ccall libmlir.mlirTypeIsAIndex(type::MlirType)::Bool
 
 ### Attributes
 
@@ -153,6 +155,8 @@ mlirAttributeGetContext(attribute) = @ccall libmlir.mlirAttributeGetContext(attr
 mlirAttributeParseGet(context, str) = @ccall libmlir.mlirAttributeParseGet(context::MlirContext, str::MlirStringRef)::MlirAttribute
 mlirDenseElementsAttrFloatGet(type, nfloats, floats) =
     @ccall libmlir.mlirDenseElementsAttrFloatGet(type::MlirType, nfloats::intptr_t, floats::Ptr{Cfloat})::MlirAttribute
+mlirDenseElementsAttrDoubleGet(type, ndoubles, doubles) =
+    @ccall libmlir.mlirDenseElementsAttrDoubleGet(type::MlirType, ndoubles::intptr_t, doubles::Ptr{Cdouble})::MlirAttribute
 mlirDenseElementsAttrInt32Get(type, nints, ints) =
     @ccall libmlir.mlirDenseElementsAttrInt32Get(type::MlirType, nints::intptr_t, ints::Ptr{Int32})::MlirAttribute
 mlirDenseElementsAttrInt64Get(type, nints, ints) =
@@ -225,7 +229,7 @@ mlirBlockGetFirstOperation(block) = @ccall libmlir.mlirBlockGetFirstOperation(bl
 mlirValueGetType(value) = @ccall libmlir.mlirValueGetType(value::MlirValue)::MlirType
 mlirValueIsNull(value) = mlirIsNull(value)
 mlirValueDump(value) = @ccall libmlir.mlirValueDump(value::MlirValue)::Cvoid
-mlirValuePrint(value, callback, userdata) = @ccall libmlir.mlirValuePrint(value::MlirValue, callback::Ptr{Cvoid}, userdata::Ptr{Cvoid})::Cvoid
+mlirValuePrint(value, callback, userdata) = @ccall libmlir.mlirValuePrint(value::MlirValue, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
 mlirValueGetFirstUse(value) = @ccall libmlir.mlirValueGetFirstUse(value::MlirValue)::MlirOpOperand
 
 ### OperationState
@@ -308,10 +312,10 @@ mlirOperationPrintWithFlags(operation, flags, callback, userdata) =
         operation::MlirOperation,
         flags::MlirOpPrintingFlags,
         callback::Ptr{Cvoid},
-        userdata::Ptr{Cvoid},
+        userdata::Any,
     )::Cvoid
 mlirOperationPrint(operation, callback, userdata) =
-    @ccall libmlir.mlirOperationPrint(operation::MlirOperation, callback::Ptr{Cvoid}, userdata::Ptr{Cvoid})::Cvoid
+    @ccall libmlir.mlirOperationPrint(operation::MlirOperation, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
 mlirOperationGetNumRegions(operation) = @ccall libmlir.mlirOperationGetNumRegions(operation::MlirOperation)::intptr_t
 mlirOperationGetRegion(operation, pos) = @ccall libmlir.mlirOperationGetRegion(operation::MlirOperation, pos::intptr_t)::MlirRegion
 mlirOperationGetNumResults(operation) = @ccall libmlir.mlirOperationGetNumResults(operation::MlirOperation)::intptr_t
@@ -328,6 +332,7 @@ mlirOperationGetFirstRegion(operation) = @ccall libmlir.mlirOperationGetFirstReg
 ### Module
 
 mlirModuleCreateEmpty(location) = @ccall libmlir.mlirModuleCreateEmpty(location::MlirLocation)::MlirModule
+mlirModuleCreateParse(context, module_) = @ccall libmlir.mlirModuleCreateParse(context::MlirContext, module_::MlirStringRef)::MlirModule
 mlirModuleDestroy(module_) = @ccall libmlir.mlirModuleDestroy(module_::MlirModule)::Cvoid
 mlirModuleIsNull(module_) = mlirIsNull(module_)
 mlirModuleGetBody(module_) = @ccall libmlir.mlirModuleGetBody(module_::MlirModule)::MlirBlock
@@ -340,9 +345,16 @@ mlirPassManagerDestroy(pass) = @ccall libmlir.mlirPassManagerDestroy(pass::MlirP
 mlirPassManagerIsNull(pass) = mlirIsNull(pass)
 mlirPassManagerGetAsOpPassManager(pass) = @ccall libmlir.mlirPassManagerGetAsOpPassManager(pass::MlirPassManager)::MlirOpPassManager
 mlirPassManagerRun(pass, module_) = @ccall libmlir.mlirPassManagerRun(pass::MlirPassManager, module_::MlirModule)::MlirLogicalResult
+mlirPassManagerEnableVerifier(pass) = @ccall libmlir.mlirPassManagerEnableVerifier(pass::MlirPassManager)::Cvoid
 
 ### Op Pass Manager
 
 mlirOpPassManagerIsNull(op_pass) = mlirIsNull(op_pass)
+mlirOpPassManagerAddPipeline(op_pass, pipeline, callback, userdata) =
+    @ccall libmlir.mlirOpPassManagerAddPipeline(op_pass::MlirOpPassManager,pipeline::MlirStringRef, callback::Ptr{Cvoid}, userdata::Any)::MlirLogicalResult
+mlirParsePassPipeline(op_pass, pipeline, callback, userdata) =
+    @ccall libmlir.mlirParsePassPipeline(op_pass::MlirOpPassManager, pipeline::MlirStringRef, callback::Ptr{Cvoid}, userdata::Any)::MlirLogicalResult
+mlirPrintPassPipeline(op_pass, callback, userdata) =
+    @ccall libmlir.mlirPrintPassPipeline(op_pass::MlirOpPassManager, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
 
 end # module LibMLIR
