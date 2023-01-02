@@ -102,6 +102,7 @@ mlirLocationFileLineColGet(context, filename, line, column) =
 ### Type
 
 mlirTypeDump(type) = @ccall libmlir.mlirTypeDump(type::MlirType)::Cvoid
+mlirTypePrint(type, callback, userdata) = @ccall libmlir.mlirTypePrint(type::MlirType, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
 mlirTypeIsNull(type) = mlirIsNull(type)
 mlirIndexTypeGet(context) = @ccall libmlir.mlirIndexTypeGet(context::MlirContext)::MlirType
 mlirIntegerTypeGet(context, size) = @ccall libmlir.mlirIntegerTypeGet(context::MlirContext, size::Cuint)::MlirType
@@ -153,6 +154,8 @@ mlirStringAttrGet(context, str) = @ccall libmlir.mlirStringAttrGet(context::Mlir
 mlirTypeAttrGet(type) = @ccall libmlir.mlirTypeAttrGet(type::MlirType)::MlirAttribute
 mlirAttributeGetContext(attribute) = @ccall libmlir.mlirAttributeGetContext(attribute::MlirAttribute)::MlirContext
 mlirAttributeParseGet(context, str) = @ccall libmlir.mlirAttributeParseGet(context::MlirContext, str::MlirStringRef)::MlirAttribute
+mlirAttributePrint(attribute, callback, userdata) = @ccall libmlir.mlirAttributePrint(attribute::MlirAttribute, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
+mlirAttributeGetType(attribute) = @ccall libmlir.mlirAttributeGetType(attribute::MlirAttribute)::MlirType
 mlirDenseElementsAttrFloatGet(type, nfloats, floats) =
     @ccall libmlir.mlirDenseElementsAttrFloatGet(type::MlirType, nfloats::intptr_t, floats::Ptr{Cfloat})::MlirAttribute
 mlirDenseElementsAttrDoubleGet(type, ndoubles, doubles) =
@@ -161,6 +164,8 @@ mlirDenseElementsAttrInt32Get(type, nints, ints) =
     @ccall libmlir.mlirDenseElementsAttrInt32Get(type::MlirType, nints::intptr_t, ints::Ptr{Int32})::MlirAttribute
 mlirDenseElementsAttrInt64Get(type, nints, ints) =
     @ccall libmlir.mlirDenseElementsAttrInt64Get(type::MlirType, nints::intptr_t, ints::Ptr{Int64})::MlirAttribute
+mlirDenseI64ArrayGet(context, size, values) =
+    @ccall libmlir.mlirDenseI64ArrayGet(context::MlirContext, size::intptr_t, values::Ptr{Int64})::MlirAttribute
 mlirFloatAttrDoubleGet(context, type, f) =
     @ccall libmlir.mlirFloatAttrDoubleGet(context::MlirContext, type::MlirType, f::Cdouble)::MlirAttribute
 mlirIntegerAttrGet(type, i) =

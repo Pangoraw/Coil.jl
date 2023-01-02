@@ -57,6 +57,14 @@ end
     @test f(x) ≈ cf(x)
 end
 
+@testset "Tracing: sum with dims" begin
+    f(x) = sum(x; dims=1)
+    cf = Coil.compile(f; verbose=false)
+
+    x = randn(Float32, 5, 6)
+    @test cf(x) ≈ cf(x)
+end
+
 @testset "Tracing: broadcasting of custom functions" begin
     f(x) = (x + 1) * 2
     g(x) = f.(x)

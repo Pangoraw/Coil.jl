@@ -212,7 +212,7 @@ end
 function reduce(
     context,
     inner_block,
-    in, out,
+    operands,
     dims=1:ndims(get_type(in));
     loc=Location(context)
 )
@@ -220,11 +220,11 @@ function reduce(
     region = Region()
     push!(region, inner_block)
     MLIR.add_owned_regions!(state, [region])
-    add_results!(state, [get_type(out)])
-    add_operands!(state, [in, out])
+    add_results!(state, [get_type(last(operands))])
+    add_operands!(state, operands)
     add_attributes!(state, [
         NamedAttribute(context, "dimensions",
-           MLIR.ArrayAttribute(context, [d - 1 for d in dims]))
+            MLIR.DenseArrayAttribute(context, collect(dims .- 1))),
     ])
     Operation(state)
 end

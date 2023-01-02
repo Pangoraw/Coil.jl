@@ -313,6 +313,13 @@ function lower_call!(cg, ::OpConfig{typeof(mapreduce)}, op)
     fred = value(op.args[2])
     @assert length(op.args) == 3 "only mapreduce(f, op, a; init=x) is currently supported"
 
+    dims = op isa KwCall ? get(op.kwargs, :dims, Colon()) : Colon()
+    if dims isa Number
+        dims = (dims,)
+    elseif dims isa Colon
+        dims = 1:ndims(type)
+    end
+
     fmapreduce = (a, b) -> fred(fmap(a), b)
 
     operand = get_arg_operand!(cg, op.args[3]; cst_op=mhlo.constant)
@@ -354,8 +361,8 @@ function lower_call!(cg, ::OpConfig{typeof(mapreduce)}, op)
 
     reduce0 = push!(block, linalg.reduce(
         mlir_ctx, inner_block,
-        operand, init_operand,
-        1:ndims(type); loc=Location(mlir_ctx, op.line)
+        [operand, init_operand],
+        dims; loc=Location(mlir_ctx, op.line)
     ))
 
     cst0 = push!(block, arith.constant(mlir_ctx, 0; loc=@loc(mlir_ctx)))
@@ -367,47 +374,50 @@ function lower_call!(cg, ::OpConfig{typeof(sum)}, op)
     (; mlir_ctx, block, tape) = cg
     ctx = tape.c
 
-    @assert length(op.args) == 1 "unsupported multi-arguments sum"
-
     operand = get_arg_operand!(cg, only(op.args); cst_op=mhlo.constant)
     type = get_type(operand)
-    shape = size(type)
 
-    # # tosa
-    # if ndims(type) != 1
-    #     reshape0 = push!(block, tosa.reshape(mlir_ctx, operand, (prod(shape),); loc=@loc(mlir_ctx)))
-    #     operand = get_result(reshape0, 1)
-    # end
+    dims = op isa KwCall ? get(op.kwargs, :dims, Colon()) : Colon()
+    if dims isa Number
+        dims = (dims,)
+    elseif dims isa Colon
+        dims = 1:ndims(type)
+    end
 
-    # sum0 = push!(block, tosa.reduce_sum(mlir_ctx, operand, 1; loc=Location(mlir_ctx, op.line)))
-    # cst0 = push!(block, arith.constant(mlir_ctx, 0; loc=@loc(mlir_ctx)))
-    # index0 = push!(block, arith.index_cast(mlir_ctx, get_result(cst0, 1); loc=@loc(mlir_ctx)))
-
-    # push!(block, tensor.extract(mlir_ctx, get_result(sum0, 1), get_result(index0, 1); loc=@loc(mlir_ctx)))
-
-    # mhlo
     T = julia_type(eltype(type))
-    unrankedT = MType(mlir_ctx, MType(mlir_ctx, T), ())
+    mT = MType(mlir_ctx, T)
 
-    cst0 = push!(block, arith.constant(mlir_ctx, zeros(T)))
+    output_size = [d for (i, d) in enumerate(size(type)) if !(i in dims)]
+    cst0 = push!(block, arith.constant(mlir_ctx, zeros(T, output_size...)))
+
     inner_block = Block(
-        [unrankedT, unrankedT],
+        [mT, mT],
         [@loc(mlir_ctx), @loc(mlir_ctx)],
     )
-    add0 = push!(inner_block, mhlo.add(mlir_ctx,
+
+    inner_cg = CodegenContext(mlir_ctx, inner_block, tape, cg.verbose)
+    add0 = push!(inner_block, gen_arith!(inner_cg, +,
         [MLIR.get_argument(inner_block, 1), MLIR.get_argument(inner_block, 2)];
         loc=@loc(mlir_ctx)),
     )
-    push!(inner_block, mhlo.return_(mlir_ctx, get_result(add0, 1); loc=@loc(mlir_ctx)))
+    push!(inner_block, linalg.yield(mlir_ctx, get_result(add0, 1); loc=@loc(mlir_ctx)))
 
-    reduce0 = push!(block, mhlo.reduce(mlir_ctx, inner_block, [operand, get_result(cst0, 1)], 1:length(shape); loc=Location(mlir_ctx, op.line)))
-    reshape2 = push!(block, mhlo.reshape(mlir_ctx, get_result(reduce0, 1), (1,); loc=@loc(mlir_ctx)))
+    reduce0 = push!(block, linalg.reduce(
+        mlir_ctx, inner_block,
+        [operand, get_result(cst0, 1)],
+        dims; loc=Location(mlir_ctx, op.line),
+    ))
 
-    cst0 = push!(block, arith.constant(mlir_ctx, 0; loc=@loc(mlir_ctx)))
-    index0 = push!(block, arith.index_cast(mlir_ctx, get_result(cst0, 1); loc=@loc(mlir_ctx)))
+    if length(output_size) == 0
+        reshape2 = push!(block, mhlo.reshape(mlir_ctx, get_result(reduce0, 1), (1,); loc=@loc(mlir_ctx)))
+        cst0 = push!(block, arith.constant(mlir_ctx, 0; loc=@loc(mlir_ctx)))
+        index0 = push!(block, arith.index_cast(mlir_ctx, get_result(cst0, 1); loc=@loc(mlir_ctx)))
 
-    extract0 = push!(block, tensor.extract(mlir_ctx, get_result(reshape2, 1), get_result(index0, 1); loc=@loc(mlir_ctx)))
-    ctx.operands[V(op)] = get_result(extract0, 1)
+        push!(block, tensor.extract(mlir_ctx, get_result(reshape2, 1), get_result(index0, 1); loc=@loc(mlir_ctx)))
+    else
+        real_output_size = [i in dims ? 1 : d for (i, d) in enumerate(size(type))]
+        push!(block, mhlo.reshape(mlir_ctx, get_result(reduce0, 1), real_output_size; loc=@loc(mlir_ctx)))
+    end
 end
 function lower_call!(cg, ::OpConfig{typeof(NNlib.conv)}, op)
     (; mlir_ctx, block, tape) = cg

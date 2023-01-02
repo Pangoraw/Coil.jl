@@ -217,9 +217,11 @@ function show_inner(io::IO, type::MType)
 end
 
 function Base.show(io::IO, type::MType)
-    print(io, "MType(\"")
-    show_inner(io, type)
-    print(io, "\")")
+    print(io, "MType(#= ")
+    c_print_callback = @cfunction(print_callback, Cvoid, (MlirStringRef, Any))
+    ref = Ref(io)
+    GC.@preserve ref LibMLIR.mlirTypePrint(type, c_print_callback, ref)
+    print(io, " =#)")
 end
 
 function julia_type(type::MType)
@@ -340,10 +342,27 @@ function ArrayAttribute(context, values::AbstractVector{Int})
         LibMLIR.mlirArrayAttrGet(context, length(elements), elements)
     )
 end
+function DenseArrayAttribute(context, values::AbstractVector{Int})
+    Attribute(
+        LibMLIR.mlirDenseI64ArrayGet(context, length(values), collect(values))
+    )
+end
 
 Base.convert(::Type{MlirAttribute}, attribute::Attribute) = attribute.attribute
 Base.parse(::Type{Attribute}, context, s) =
     Attribute(LibMLIR.mlirAttributeParseGet(context, s))
+
+function get_type(attribute::Attribute)
+    MType(LibMLIR.mlirAttributeGetType(attribute))
+end
+
+function Base.show(io::IO, attribute::Attribute)
+    print(io, "Attribute(#= ")
+    c_print_callback = @cfunction(print_callback, Cvoid, (MlirStringRef, Any))
+    ref = Ref(io)
+    GC.@preserve ref LibMLIR.mlirAttributePrint(attribute, c_print_callback, ref)
+    print(io, " =#)")
+end
 
 ### Named Attribute
 
