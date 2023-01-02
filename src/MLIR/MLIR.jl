@@ -774,7 +774,7 @@ function get_input_type(module_)
     get_dialects!(dialects, op)
 
     if :mhlo ∈ dialects
-        :tosa ∉ dialects || throw("cannot have both tosa and mhlo operations")
+        # :tosa ∉ dialects || throw("cannot have both tosa and mhlo operations")
         :mhlo
     elseif :tosa ∈ dialects
         :tosa

@@ -301,32 +301,47 @@ function lower_call!(cg, ::OpConfig{typeof(map)}, op)
     out0 = push!(block, tensor.empty(mlir_ctx, type; loc=@loc(mlir_ctx)))
     push!(block, linalg.map(mlir_ctx, inner_block, operand, get_result(out0, 1); loc=Location(mlir_ctx, op.line)))
 end
+function lower_call!(cg, ::OpConfig{typeof(zero)}, op)
+    (; mlir_ctx, block) = cg
+    T = value(only(op.args))
+    push!(block, mhlo.constant(mlir_ctx, op.val; loc=Location(mlir_ctx, op.line)))
+end
 function lower_call!(cg, ::OpConfig{typeof(mapreduce)}, op)
     (; mlir_ctx, block) = cg
 
     fmap = value(op.args[1])
     fred = value(op.args[2])
-    @assert length(op.args) == 3
+    @assert length(op.args) == 3 "only mapreduce(f, op, a; init=x) is currently supported"
 
     fmapreduce = (a, b) -> fred(fmap(a), b)
 
     operand = get_arg_operand!(cg, op.args[3]; cst_op=mhlo.constant)
     type = get_type(operand)
+
     init_operand = get_arg_operand!(cg, op.kwargs.init; cst_op=mhlo.constant)
 
     valx = first(value(op.args[3]))
     init = op.kwargs.init
     vali = value(init)
 
-    if !(vali isa AbstractArray)
+    if !MLIR.is_tensor(get_type(init_operand))
         empty0 = push!(block, tensor.empty(mlir_ctx,
             MType(mlir_ctx, eltype(get_type(init_operand)), ()); loc=@loc(mlir_ctx)))
         fill0 = push!(block, linalg.fill(mlir_ctx, init_operand, get_result(empty0, 1); loc=@loc(mlir_ctx)))
         init_operand = get_result(fill0, 1)
+
+        # reshape0 = push!(block, tosa.reshape(mlir_ctx, init_operand, Int[]; loc=@loc(mlir_ctx)))
+        # init_operand = get_result(reshape0, 1)
+    end
+
+    init_size = size(get_type(init_operand))
+    if false && init_size == ()
+        reshape0 = push!(block, mhlo.reshape(mlir_ctx, init_operand, (1,); loc=@loc(mlir_ctx)))
+        init_operand = get_result(reshape0, 1)
     end
 
     _, unary_tape = _trace(fmapreduce, valx, vali)
-    tensorize!(unary_tape)
+    # tensorize!(unary_tape)
 
     inner_block = Block(MType[], Location[])
     unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose)
@@ -334,13 +349,15 @@ function lower_call!(cg, ::OpConfig{typeof(mapreduce)}, op)
     lower_tape!(unary_cg)
     unary_ctx = unary_tape.c
 
-    push!(inner_block, mhlo.return_(mlir_ctx, unary_ctx.operands[unary_tape.result]))
+    push!(inner_block, linalg.yield(
+        mlir_ctx, unary_ctx.operands[unary_tape.result]))
 
-    reduce0 = push!(block, mhlo.reduce(
+    reduce0 = push!(block, linalg.reduce(
         mlir_ctx, inner_block,
-        [operand, init_operand],
+        operand, init_operand,
         1:ndims(type); loc=Location(mlir_ctx, op.line)
     ))
+
     cst0 = push!(block, arith.constant(mlir_ctx, 0; loc=@loc(mlir_ctx)))
     index0 = push!(block, arith.index_cast(mlir_ctx, get_result(cst0, 1); loc=@loc(mlir_ctx)))
     reshape0 = push!(block, mhlo.reshape(mlir_ctx, get_result(reduce0, 1), (1,); loc=@loc(mlir_ctx)))

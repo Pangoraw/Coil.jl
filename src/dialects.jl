@@ -1,4 +1,5 @@
 module func
+# https://mlir.llvm.org/docs/Dialects/Func/
 
 using ..MLIR
 using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
@@ -12,6 +13,7 @@ end
 end # module func
 
 module math
+# https://mlir.llvm.org/docs/Dialects/MathOps/
 
 using ..MLIR
 using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
@@ -28,6 +30,7 @@ end
 end # module math
 
 module arith
+# https://mlir.llvm.org/docs/Dialects/ArithOps/
 
 using ..MLIR
 using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
@@ -58,6 +61,7 @@ for (f, t) in Iterators.product(
     end
 end
 
+# https://mlir.llvm.org/docs/Dialects/ArithOps/#arithindex_cast-mlirarithindexcastop
 for f in (:index_cast, :index_castui)
     @eval function $f(context, operand; loc=Location(context))
         state = OperationState($(string("arith.", f)), loc)
@@ -67,6 +71,7 @@ for f in (:index_cast, :index_castui)
     end
 end
 
+# https://mlir.llvm.org/docs/Dialects/ArithOps/#arithextf-mlirarithextfop
 function extf(context, operand, type; loc=Location(context))
     state = OperationState("arith.exf", loc)
     MLIR.add_results!(state, [type])
@@ -74,6 +79,7 @@ function extf(context, operand, type; loc=Location(context))
     Operation(state)
 end
 
+# https://mlir.llvm.org/docs/Dialects/ArithOps/#arithsitofp-mlirarithsitofpop
 function sitofp(context, operand, ftype=float(julia_type(eltype(get_type(operand)))); loc=Location(context))
     state = OperationState("arith.sitofp", loc)
     type = get_type(operand)
@@ -86,6 +92,7 @@ function sitofp(context, operand, ftype=float(julia_type(eltype(get_type(operand
     Operation(state)
 end
 
+# https://mlir.llvm.org/docs/Dialects/ArithOps/#arithfptosi-mlirarithfptosiop
 function fptosi(context, operand, itype; loc=Location(context))
     state = OperationState("arith.fptosi", loc)
     type = get_type(operand)
@@ -98,6 +105,7 @@ function fptosi(context, operand, itype; loc=Location(context))
     Operation(state)
 end
 
+# https://mlir.llvm.org/docs/Dialects/ArithOps/#arithconstant-mlirarithconstantop
 function constant(
     context, values::AbstractArray,
     type=MType(context, MType(context, eltype(values)), size(values));
@@ -112,6 +120,7 @@ function constant(
     Operation(state)
 end
 
+# https://mlir.llvm.org/docs/Dialects/ArithOps/#arithconstant-mlirarithconstantop
 function constant(context, value, type=MType(context, typeof(value)); loc=Location(context))
     state = OperationState("arith.constant", loc)
     MLIR.add_results!(state, [type])
@@ -125,10 +134,13 @@ end
 end # module arith
 
 module tosa
+# https://mlir.llvm.org/docs/Dialects/TOSA/
 
 using ..MLIR
 using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
 
+# https://mlir.llvm.org/docs/Dialects/TOSA/#tosamaximum-mlirtosamaximumop
+# https://mlir.llvm.org/docs/Dialects/TOSA/#tosaminimum-mlirtosaminimumop
 for f in (:maximum, :minimum)
     @eval function $f(context, operands; loc=Location(context))
         state = OperationState($(string("tosa.", f)), loc)
@@ -138,6 +150,7 @@ for f in (:maximum, :minimum)
     end
 end
 
+# https://mlir.llvm.org/docs/Dialects/TOSA/#tosaconst-mlirtosaconstop
 function const_(context, value, type=MType(context, typeof(value), size(value)); loc=Location(context))
     state = OperationState("tosa.const", loc)
     MLIR.add_results!(state, [type])
@@ -148,6 +161,7 @@ function const_(context, value, type=MType(context, typeof(value), size(value));
     Operation(state)
 end
 
+# https://mlir.llvm.org/docs/Dialects/TOSA/#tosareshape-mlirtosareshapeop
 function reshape(context, operand, shape; loc=Location(context))
     state = OperationState("tosa.reshape", loc)
     out_type = MType(context, eltype(MLIR.get_type(operand)), shape)
@@ -159,6 +173,7 @@ function reshape(context, operand, shape; loc=Location(context))
     Operation(state)
 end
 
+# https://mlir.llvm.org/docs/Dialects/TOSA/#tosareduce_sum-mlirtosareducesumop
 function reduce_sum(context, input, axis; loc=Location(context))
     state = OperationState("tosa.reduce_sum", loc)
 
@@ -177,25 +192,12 @@ end
 
 end # module tosa
 
-module index
-
-using ..MLIR
-using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
-
-function constant(context, value; loc=Location(context))
-    state = OperationState("index.constant", loc)
-    add_results!(state, [MType(context, Int)])
-    add_attributes!(state, [NamedAttribute(context, "value", Attribute(context, value - 1))])
-    Operation(state)
-end
-
-end # module index
-
 module linalg
 
 using ..MLIR
 using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
 
+# https://mlir.llvm.org/docs/Dialects/Linalg/#linalgmap-mlirlinalgmapop
 function map(context, inner_block, in, out; loc=Location(context))
     state = OperationState("linalg.map", loc)
     region = Region()
@@ -206,21 +208,43 @@ function map(context, inner_block, in, out; loc=Location(context))
     Operation(state)
 end
 
+# https://mlir.llvm.org/docs/Dialects/Linalg/#linalgreduce-mlirlinalgreduceop
+function reduce(
+    context,
+    inner_block,
+    in, out,
+    dims=1:ndims(get_type(in));
+    loc=Location(context)
+)
+    state = OperationState("linalg.reduce", loc)
+    region = Region()
+    push!(region, inner_block)
+    MLIR.add_owned_regions!(state, [region])
+    add_results!(state, [get_type(out)])
+    add_operands!(state, [in, out])
+    add_attributes!(state, [
+        NamedAttribute(context, "dimensions",
+           MLIR.ArrayAttribute(context, [d - 1 for d in dims]))
+    ])
+    Operation(state)
+end
+
+# https://mlir.llvm.org/docs/Dialects/Linalg/#linalgyield-mlirlinalgyieldop
 function yield(context, operand; loc=Location(context))
     state = OperationState("linalg.yield", loc)
     MLIR.add_operands!(state, [operand])
     Operation(state)
 end
 
+# https://mlir.llvm.org/docs/Dialects/Linalg/#linalgfill-mlirlinalgfillop
 function fill(context, operands...; loc=Location(context))
     state = OperationState("linalg.fill", loc)
-    # MLIR.enable_type_inference!(state)
-    add_owned_regions!(state, [Region()])
+    MLIR.add_owned_regions!(state, [Region()])
     add_operands!(state, collect(operands))
     add_results!(state, [get_type(last(operands))])
     add_attributes!(state, [
         NamedAttribute(context, "operand_segment_sizes",
-            Attribute(context, collect(Int32.(length.(size.(get_type.(operands)))))))
+            Attribute(context, collect(Int32.(length.(size.(get_type.(operands))))))),
     ])
     Operation(state)
 end
@@ -232,12 +256,14 @@ module tensor
 using ..MLIR
 using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
 
+# https://mlir.llvm.org/docs/Dialects/TensorOps/#tensorempty-mlirtensoremptyop
 function empty(context, type; loc=Location(context))
     state = OperationState("tensor.empty", loc)
     MLIR.add_results!(state, [type])
     Operation(state)
 end
 
+# https://mlir.llvm.org/docs/Dialects/TensorOps/#tensorextract-mlirtensorextractop
 function extract(context, operand, I...; loc=Location(context))
     state = OperationState("tensor.extract", loc)
     MLIR.add_results!(state, [eltype(get_type(operand))])
