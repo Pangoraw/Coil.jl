@@ -126,7 +126,7 @@ function constant(context, value, type=MType(context, typeof(value)); loc=Locati
     MLIR.add_results!(state, [type])
     MLIR.add_attributes!(state, [
         MLIR.NamedAttribute(context, "value",
-            Attribute(context, value)),
+            Attribute(context, value, type)),
     ])
     Operation(state)
 end

@@ -236,6 +236,17 @@ mlirValueIsNull(value) = mlirIsNull(value)
 mlirValueDump(value) = @ccall libmlir.mlirValueDump(value::MlirValue)::Cvoid
 mlirValuePrint(value, callback, userdata) = @ccall libmlir.mlirValuePrint(value::MlirValue, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
 mlirValueGetFirstUse(value) = @ccall libmlir.mlirValueGetFirstUse(value::MlirValue)::MlirOpOperand
+mlirValueIsAOpResult(value) = @ccall libmlir.mlirValueIsAOpResult(value::MlirValue)::Bool
+mlirOpResultGetOwner(value) = @ccall libmlir.mlirOpResultGetOwner(value::MlirValue)::MlirOperation
+mlirValueIsABlockArgument(value) = @ccall libmlir.mlirValueIsABlockArgument(value::MlirValue)::Bool
+mlirBlockArgumentGetOwner(value) = @ccall libmlir.mlirBlockArgumentGetOwner(value::MlirValue)::MlirBlock
+
+### Op Operand
+
+mlirOpOperandIsNull(op_operand) = mlirIsNull(op_operand)
+mlirOpOperandGetOwner(op_operand) = @ccall libmlir.mlirOpOperandGetOwner(op_operand::MlirOpOperand)::MlirValue
+mlirOpOperandGetOperandNumber(op_operand) = @ccall libmlir.mlirOpOperandGetOperandNumber(op_operand::MlirOpOperand)::Cuint
+mlirOpOperandGetNextUse(op_operand) = @ccall libmlir.mlirOpOperandGetNextUse(op_operand::MlirOpOperand)::MlirOpOperand
 
 ### OperationState
 
@@ -333,6 +344,10 @@ mlirOperationGetBlock(operation) = @ccall libmlir.mlirOperationGetBlock(operatio
 mlirOperationGetParentOperation(operation) = @ccall libmlir.mlirOperationGetParentOperation(operation::MlirOperation)::MlirOperation
 mlirOperationGetNextInBlock(operation) = @ccall libmlir.mlirOperationGetNextInBlock(operation::MlirOperation)::MlirOperation
 mlirOperationGetFirstRegion(operation) = @ccall libmlir.mlirOperationGetFirstRegion(operation::MlirOperation)::MlirRegion
+mlirOperationVerify(operation) = @ccall libmlir.mlirOperationVerify(operation::MlirOperation)::Bool
+mlirOperationGetOperand(operation, i) = @ccall libmlir.mlirOperationGetOperand(operation::MlirOperation, i::intptr_t)::MlirValue
+mlirOperationSetOperand(operation, i, value) = @ccall libmlir.mlirOperationSetOperand(operation::MlirOperation, i::intptr_t, value::MlirValue)::Cvoid
+mlirOperationGetNumOperands(operation) = @ccall libmlir.mlirOperationGetNumOperands(operation::MlirOperation)::intptr_t
 
 ### Module
 

@@ -34,6 +34,7 @@ using .LibMLIR:
     MlirContext,
     MlirType,
     MlirValue,
+    MlirOpOperand,
     MlirIdentifier,
     MlirPassManager,
     MlirOpPassManager
@@ -192,8 +193,8 @@ function show_inner(io::IO, type::MType)
 
         width = LibMLIR.mlirIntegerTypeGetWidth(type)
         t = if is_signed
-            "si" 
-       elseif is_signless
+            "si"
+        elseif is_signless
             "i"
         else
             "u"
@@ -288,11 +289,11 @@ end
 Attribute() = Attribute(LibMLIR.mlirAttributeGetNull())
 Attribute(context, s::AbstractString) = Attribute(LibMLIR.mlirStringAttrGet(context, s))
 Attribute(type::MType) = Attribute(LibMLIR.mlirTypeAttrGet(type))
-Attribute(context, f::Float32) = Attribute(
-    LibMLIR.mlirFloatAttrDoubleGet(context, MType(context, Float32), Float64(f))
+Attribute(context, f::Float32, type=MType(context, Float32)) = Attribute(
+    LibMLIR.mlirFloatAttrDoubleGet(context, type, Float64(f))
 )
-Attribute(context, f::Float64) = Attribute(
-    LibMLIR.mlirFloatAttrDoubleGet(context, MType(context, Float64), f)
+Attribute(context, f::Float64, type=MType(context, Float64)) = Attribute(
+    LibMLIR.mlirFloatAttrDoubleGet(context, type, f)
 )
 Attribute(context, i::T) where {T<:Integer} = Attribute(
     LibMLIR.mlirIntegerAttrGet(MType(context, T), Int64(i))
@@ -345,6 +346,11 @@ end
 function DenseArrayAttribute(context, values::AbstractVector{Int})
     Attribute(
         LibMLIR.mlirDenseI64ArrayGet(context, length(values), collect(values))
+    )
+end
+function Attribute(context, value::Int, type::MType)
+    Attribute(
+        LibMLIR.mlirIntegerAttrGet(type, value)
     )
 end
 
@@ -401,6 +407,92 @@ function Base.show(io::IO, value::Value)
     ref = Ref(io)
     GC.@preserve ref LibMLIR.mlirValuePrint(value, c_print_callback, ref)
 end
+
+is_a_op_result(value) = LibMLIR.mlirValueIsAOpResult(value)
+is_a_block_argument(value) = LibMLIR.mlirValueIsABlockArgument(value)
+
+function get_owner(value::Value)
+    if is_a_block_argument(value)
+        raw_block = LibMLIR.mlirBlockArgumentGetOwner(value)
+        if LibMLIR.mlirBlockIsNull(raw_block)
+            return nothing
+        end
+
+        return Block(raw_block, false)
+    end
+
+    raw_op = LibMLIR.mlirOpResultGetOwner(value)
+    if LibMLIR.mlirOperationIsNull(raw_op)
+        return nothing
+    end
+
+    return Operation(raw_op, false)
+end
+
+function get_first_use(value)
+    raw_op_operand = LibMLIR.mlirValueGetFirstUse(value)
+    if LibMLIR.mlirOpOperandIsNull(raw_op_operand)
+        return nothing
+    end
+    OpOperand(raw_op_operand)
+end
+
+struct UsesIterator
+    value::Value
+end
+uses(value) = UsesIterator(value)
+
+function Base.iterate(it::UsesIterator)
+    op_operand = get_first_use(it)
+    if isnothing(op_operand)
+        return nothing
+    end
+
+    return (
+        (get_owner(op_operand), get_operand_number(op_operand)),
+        op_operand,
+    )
+end
+
+function Base.iterate(::UsesIterator, op_operand)
+    next_op_operand = get_next_use(op_operand)
+    if isnothing(next_op_operand)
+        return nothing
+    end
+
+    return (
+        (get_owner(next_op_operand), get_operand_number(next_op_operand)),
+        next_op_operand,
+    )
+end
+
+### Op Operand
+
+struct OpOperand
+    op_operand::MlirOpOperand
+
+    OpOperand(op_operand) = begin
+        @assert !LibMLIR.mlirOpOperandIsNull(op_operand) "cannot create OpOperand with null MlirOpOperand"
+        new(op_operand)
+    end
+end
+
+function get_owner(op_operand::OpOperand)
+    raw_op = LibMLIR.mlirOpOperandGetOwner(op_operand)
+    Operation(raw_op, false)
+end
+
+get_operand_number(op_operand) = LibMLIR.mlirOpOperandGetOperandNumber(op_operand)
+function get_next_use(op_operand)
+    next_op_operand = LibMLIR.mlirOpOperandGetNextUse(op_operand)
+    if LibMLIR.mlirOpOperandIsNull(next_op_operand)
+        nothing
+    else
+        OpOperand(next_op_operand)
+    end
+end
+
+Base.convert(::Type{MlirOpOperand}, op_operand::OpOperand) = op_operand.op_operand
 
 ### OperationState
 
@@ -462,6 +554,17 @@ function get_result(operation, i)
     i ∉ 1:num_results(operation) && throw(BoundsError(operation, i))
     Value(LibMLIR.mlirOperationGetResult(operation, i - 1))
 end
+num_operands(operation) = LibMLIR.mlirOperationGetNumOperands(operation)
+function get_operand(operation, i)
+    i ∉ 1:num_operands(operation) && throw(BoundsError(operation, i))
+    Value(LibMLIR.mlirOperationGetOperand(operation, i - 1))
+end
+function set_operand!(operation, i, value)
+    i ∉ 1:num_operands(operation) && throw(BoundsError(operation, i))
+    LibMLIR.mlirOperationSetOperand(operation, i - 1, value)
+    value
+end
+
 get_location(operation) = Location(LibMLIR.mlirOperationGetLocation(operation))
 get_name(operation) = String(LibMLIR.mlirOperationGetName(operation))
 get_block(operation) = Block(LibMLIR.mlirOperationGetBlock(operation), false)
@@ -486,6 +589,8 @@ function Base.show(io::IO, operation::Operation)
     GC.@preserve ref LibMLIR.mlirOperationPrintWithFlags(operation, flags, c_print_callback, ref)
     println(io)
 end
+
+verify(operation::Operation) = LibMLIR.mlirOperationVerify(operation)
 
 ### Block
 
@@ -772,15 +877,36 @@ end
 
 ### Utils
 
-function get_dialects!(dialects::Set{Symbol}, op::Operation)
-    push!(dialects, get_dialect(op))
-
+function visit(f, op)
     for region in RegionIterator(op)
         for block in BlockIterator(region)
             for op in OperationIterator(block)
-                get_dialects!(dialects, op)
+                f(op)
             end
         end
+    end
+end
+
+"""
+    verifyall(operation; debug=false)
+
+Prints the operations which could not be verified.
+"""
+function verifyall(operation::Operation; debug=false)
+    io = IOContext(stdout, :debug => debug)
+    visit(operation) do op
+        if !verify(op)
+            show(io, op)
+        end
+    end
+end
+verifyall(module_::MModule) = get_operation(module_) |> verifyall
+
+function get_dialects!(dialects::Set{Symbol}, op::Operation)
+    push!(dialects, get_dialect(op))
+
+    visit(op) do op
+        get_dialects!(dialects, op)
     end
 
     dialects
