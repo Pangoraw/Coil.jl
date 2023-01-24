@@ -1,8 +1,15 @@
 # Coil.jl
 
-> An holiday experiment to lower and execute Julia tensor operations to the IREE compiler stack using MLIR.
+> An experimental package to lower and execute Julia tensor operations to the IREE compiler stack using MLIR.
 
-Coil exports only one function: `Coil.compile(f)` which returns a function leverages [MLIR](https://mlir.llvm.org) and the [IREE](https://github.com/iree-org/iree) compiler stack to produce a (hopefully) faster version of `f`.
+Coil exports only one function: `Coil.compile(f)` which returns a function leverages [MLIR](https://mlir.llvm.org) and the [IREE](https://github.com/iree-org/iree) compiler stack to produce a (hopefully) faster version of `f`. Goals are the following:
+
+ - Perform whole model analysis and optimizations to fuse and re-order operations across function calls.
+ - Evaluate on different hardware accelerators using the [IREE](https://github.com/iree-org/iree) runtime.
+
+## Example usage
+
+`Coil.compile` *should* return an equivalent and hopefully faster function. Note that like Julia, the function will compile when its first called.
 
 ```julia
 julia> using Coil, Flux
@@ -51,3 +58,91 @@ module {
   }
 }
 ```
+
+## Tracing
+
+To trace functions, Coil leverages [Umlaut.jl]() which converts functions to linearized tapes. It then replaces lowerable calls from this tape to MLIR operations. Since not all Julia
+calls can be replaced to MLIR operation (struct code, io, etc...), the transformation produce a new
+tape where only tensor and arithmetic operations are lifted to MLIR dialects.
+
+Consider this input tape of a `Flux.Dense` layer with bias and a relu activation:
+
+```
+julia> import Coil.Tracing
+
+julia> dense = Dense(3, 6, relu)
+Dense(3 => 6, relu)  # 24 parameters
+
+julia> x = randn(Float32,3,1);
+
+julia> _, tape = Tracing.trace(dense, x; ctx=Tracing.Context(dense));
+
+julia> tape
+inp %1::Dense{typeof(relu), Matrix{Float32}, Vector{Float32}}
+  inp %2::Matrix{Float32}
+  const %3 = fast_act::typeof(NNlib.fast_act)
+  %4 = getproperty(%1, :σ)::typeof(relu) 
+  const %5 = nothing::Nothing
+  const %6 = +::typeof(+)
+  %7 = getproperty(%1, :weight)::Matrix{Float32} 
+  %8 = *(%7, %2)::Matrix{Float32} 
+  %9 = getproperty(%1, :bias)::Vector{Float32} 
+  %10 = broadcasted(%6, %8, %9)::Broadcasted{} 
+  %11 = broadcasted(%4, %10)::Broadcasted{} 
+  %12 = materialize(%11)::Matrix{Float32} 
+
+julia> Tracing.compile_tape(tape, x; verbose=true)
+[...]
+Tape{Coil.Tracing.Context}
+  inp %1::Dense{typeof(relu), Matrix{Float32}, Vector{Float32}}
+  inp %2::Matrix{Float32}
+  %3 = getproperty(%1, :weight)::Matrix{Float32} 
+  %4 = getproperty(%1, :bias)::Vector{Float32} 
+  %5 = Call(#= 3 => 1 =#)(%3, %2, %4)::Matrix{Float32} 
+```
+
+where the `Call` struct calls into the following generated MLIR function:
+
+```julia
+julia> Coil.@code_mlir dense(x)
+MModule:
+module {
+  func.func @Dense(%arg0: tensor<6x3xf32>, %arg1: tensor<3x1xf32>, %arg2: tensor<6xf32>) -> tensor<6x1xf32> {
+    %0 = "mhlo.dot"(%arg0, %arg1) : (tensor<6x3xf32>, tensor<3x1xf32>) -> tensor<6x1xf32>
+    %1 = "mhlo.broadcast_in_dim"(%arg2) {broadcast_dimensions = dense<0> : tensor<1xi64>} : (tensor<6xf32>) -> tensor<6x1xf32>
+    %2 = mhlo.add %0, %1 : tensor<6x1xf32>
+    %3 = tensor.empty() : tensor<6x1xf32>
+    %cst = arith.constant dense<0.000000e+00> : tensor<6x1xf32>
+    %3 = arith.maxf %2, %cst : tensor<6x1xf32>
+    return %3 : tensor<6x1xf32>
+  }
+}
+```
+
+### Control flow
+
+Due to its use of [Umlaut.jl](https://github.com/dfdx/Umlaut.jl), all control flow from the input function is taken as is for the first given arguments. This means that loops and conditions are unrolled when applied to the linear tape.  
+
+## Building
+
+To build [IREE](https://github.com/iree-org/iree) to be used as a shared library callable from Julia, you need to use a [custom fork](https://github.com/Pangoraw/iree/tree/build_coil):
+
+```bash
+git clone https://github.com/Pangoraw/iree
+cd iree
+git checkout build_coil
+git submodule update --init
+cmake -GNinja -B ../iree-build/ -S . \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DIREE_ENABLE_ASSERTIONS=ON \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DIREE_ENABLE_LLD=ON
+```
+
+This will create the two required libraries in the `iree-build/` folder:
+
+ - The compiler library (`libIREECompiler`) containing MLIR and IREE specific passes.
+ - The runtime library (`lib_runtime_shared_shared`) containing the bytecode interpreter and drivers to run IREE programs.
+
+Later, these libraries will be provided as _jll packages built using [Binary Builder](https://binarybuilder.org).
