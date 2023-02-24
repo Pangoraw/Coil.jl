@@ -2,10 +2,13 @@
 
 > An experimental package to lower and execute Julia tensor operations to the IREE compiler stack using MLIR.
 
-Coil exports only one function: `Coil.compile(f)` which returns a function leverages [MLIR](https://mlir.llvm.org) and the [IREE](https://github.com/iree-org/iree) compiler stack to produce a (hopefully) faster version of `f`. Goals are the following:
+Coil exports only one function: `Coil.compile(f)` which returns a function which leverages [MLIR](https://mlir.llvm.org) and the [IREE](https://github.com/iree-org/iree) compiler stack to produce a (hopefully) faster version of `f`. Goals are the following:
 
  - Perform whole model analysis and optimizations to fuse and re-order operations across function calls.
+ - Fold model hyperparameters by unrolling loops, control flow, etc...
  - Evaluate on different hardware accelerators using the [IREE](https://github.com/iree-org/iree) runtime.
+
+Note that this currently does meet any of those goals and is first and foremost a way for me to learn about MLIR and IREE.
 
 ## Example usage
 
