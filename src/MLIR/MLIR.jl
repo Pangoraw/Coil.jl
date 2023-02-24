@@ -765,13 +765,22 @@ function Base.show(io::IO, op_pass::OpPassManager)
     print(io, "\"\"\")")
 end
 
+struct AddPipelineException <: Exception
+    message::String
+end
+
+function Base.showerror(io::IO, err::AddPipelineException)
+    print(io, "failed to add pipeline:", err.message)
+    nothing
+end
+
 function add_pipeline!(op_pass::OpPassManager, pipeline)
     io = IOBuffer()
     c_print_callback = @cfunction(print_callback, Cvoid, (MlirStringRef, Any))
     result = GC.@preserve io LibMLIR.mlirOpPassManagerAddPipeline(op_pass, pipeline, c_print_callback, io)
     if LibMLIR.mlirLogicalResultIsFailure(result)
-        msg = String(take!(io))
-        throw("failed to add pipeline: $msg")
+        exc = AddPipelineException(String(take!(io)))
+        throw(exc)
     end
     op_pass
 end

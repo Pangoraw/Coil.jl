@@ -109,16 +109,27 @@ Context(f) = Context(
 
 _not_a_primitive() = nothing
 
-# const 
+const primitives = Set([
+    Base.setindex!,
+    eltype,
+    Core.arrayset,
+    getproperty,
+    getfield,
+    Core.apply_type,
+    Tuple,
+    DataType,
+    NamedTuple,
+    fieldtype,
+    Umlaut.__new__,
+])
 
 function Umlaut.isprimitive(c::Context, f, args...)
     if f == Core.kwcall
         return Umlaut.isprimitive(c, args[2], args[3:end]...)
     end
-    primitives = Set([getproperty, getfield, Core.apply_type, Tuple, DataType, NamedTuple, fieldtype, Umlaut.__new__])
 
     f isa Umlaut.Variable ||
-        parentmodule(f) == Core ||
+        (f isa Function && parentmodule(f) == Core) ||
         f in primitives ||
         f isa DataType ||
         which(lower_call!, (Any, OpConfig{typeof(f)}, Umlaut.Call)) !=
@@ -343,7 +354,6 @@ function lower_call!(cg, ::OpConfig{typeof(mapreduce)}, op)
     dims = op isa KwCall ? get(op.kwargs, :dims, Colon()) : Colon()
     if dims isa Umlaut.Variable
         dims = value(dims)
-        @show dims
     end
 
     if dims isa Number
@@ -817,7 +827,7 @@ function lower_tape!(cg)
 end
 
 """
-    _trace(f, args...; ctx)
+    _trace(f, args...; ctx)::Umlaut.Tape{Coil.Tracing.Context}
 
 Wraps `Umlaut.trace` but does not recurse into the provided function
 if it is a primitive and replace and instead make it such that the function
@@ -835,7 +845,7 @@ function _trace(f, args...; ctx=Context(f))
 end
 
 """
-  compile(f; verbose::Bool=false, discard_first_outputs::Bool=false)
+  compile(f; verbose::Bool=false, discard_first_outputs::Bool=false)::Function
 
 Returns a compiled version of the provided function which will
 lazily be compiled + specialized on its arguments on the first call to this function.
@@ -876,15 +886,13 @@ function compile(f; verbose=false, discard_first_outputs=false)
             # session = get_session()
             # f = iree(session, f)
 
-            ctx = Context(f)
-
-            out, tape = _trace(f, args...; ctx)
+            out, tape = _trace(f, args...)
             verbose && display(tape)
 
             compiled_f = compile_tape(tape, args...; verbose)
 
             if discard_first_outputs
-                compiled_f(args...)
+                Base.invokelatest(compiled_f, args...)
             else
                 out
             end
@@ -894,14 +902,18 @@ function compile(f; verbose=false, discard_first_outputs=false)
     end
 end
 
+"""
+    @tape(f(args...))::Tape{Coil.Tracing.Context}
+
+Returns the corresponding Umlaut tape to this function call.
+"""
 macro tape(call)
     Meta.isexpr(call, :call) || throw("expected call Expr")
     quote
         let
             f = $(esc(first(call.args)))
             args = $(esc(Expr(:vect, call.args[begin+1:end]...)))
-            ctx = Context(f)
-            _, tape = _trace(f, args...; ctx)
+            _, tape = _trace(f, args...)
             tape
         end
     end
