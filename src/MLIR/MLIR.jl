@@ -226,6 +226,7 @@ function Base.show(io::IO, type::MType)
 end
 
 function inttype(size, issigned)
+   size == 1 && issigned && return Bool
    ints = (Int8, Int16, Int32, Int64, Int128)
    IT = ints[Int(log2(size)) - 2]
    issigned ? IT : unsigned(IT)
@@ -236,7 +237,7 @@ function julia_type(type::MType)
         is_signed = LibMLIR.mlirIntegerTypeIsSigned(type) ||
                     LibMLIR.mlirIntegerTypeIsSignless(type)
         width = LibMLIR.mlirIntegerTypeGetWidth(type)
-
+    
         try
             inttype(width, is_signed)
         catch
