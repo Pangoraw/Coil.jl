@@ -1,6 +1,10 @@
 module LibMLIR
 
 const libmlir = expanduser("~/Projects/iree-build/lib/libIREECompiler.so.0")
+if !isfile(libmlir)
+    error("🔴🔴🔴 '$libmlir' not found, try changing its definition at $(@__FILE__):$(@__LINE__() - 2)")
+end
+
 # using MLIR_jll: libMLIR
 # const libmlir = libMLIR
 
