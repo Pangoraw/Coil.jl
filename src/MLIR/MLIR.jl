@@ -225,31 +225,21 @@ function Base.show(io::IO, type::MType)
     print(io, " =#)")
 end
 
+function inttype(size, issigned)
+   ints = (Int8, Int16, Int32, Int64, Int128)
+   IT = ints[Int(log2(size)) - 2]
+   issigned ? IT : unsigned(IT)
+end
+
 function julia_type(type::MType)
     if LibMLIR.mlirTypeIsAInteger(type)
         is_signed = LibMLIR.mlirIntegerTypeIsSigned(type) ||
                     LibMLIR.mlirIntegerTypeIsSignless(type)
         width = LibMLIR.mlirIntegerTypeGetWidth(type)
 
-        if (is_signed, width) == (true, 32)
-            Int32
-        elseif (is_signed, width) == (false, 32)
-            UInt32
-        elseif (is_signed, width) == (true, 16)
-            Int16
-        elseif (is_signed, width) == (false, 16)
-            UInt16
-        elseif (is_signed, width) == (true, 8)
-            Int8
-        elseif (is_signed, width) == (false, 8)
-            UInt8
-        elseif (is_signed, width) == (true, 64)
-            Int64
-        elseif (is_signed, width) == (false, 64)
-            UInt64
-        elseif (is_signed, width) == (true, 1)
-            Bool
-        else
+        try
+            inttype(width, is_signed)
+        catch
             t = is_signed ? "i" : "u"
             throw("could not convert type $(t)$(width) to julia")
         end
