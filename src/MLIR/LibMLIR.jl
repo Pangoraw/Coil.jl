@@ -397,6 +397,8 @@ mlirPrintPassPipeline(op_pass, callback, userdata) =
     @ccall libmlir.mlirPrintPassPipeline(op_pass::MlirOpPassManager, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
 mlirOpPassManagerAddOwnedPass(op_pass, pass) =
     @ccall libmlir.mlirOpPassManagerAddOwnedPass(op_pass::MlirOpPassManager, pass::MlirPass)::Cvoid
+mlirOpPassManagerGetNestedUnder(op_pass, opname) =
+    @ccall libmlir.mlirOpPassManagerGetNestedUnder(op_pass::MlirOpPassManager, opname::MlirStringRef)::MlirOpPassManager
 
 ### TypeID
 

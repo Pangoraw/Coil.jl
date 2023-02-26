@@ -44,6 +44,14 @@ end
     @test f(a, b) ≈ cf(a,b)
 end
 
+@testset "Tracing: Flatten" begin
+    flatten(x) = reshape(x, :)
+    cflatten = Coil.compile(flatten; verbose=true)
+    x = Int32[1 4; 2 5; 3 6]
+    @test cflatten(x) == flatten(x)
+    @test_broken cflatten(x) == flatten(x)
+end
+
 @testset "Tracing: reshape" begin
   f(x) = reshape(x, 10, 10, 2)
   cf = Coil.compile(f; verbose=false)

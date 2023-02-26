@@ -4,7 +4,7 @@ import ..MLIR
 import ..mhlo
 
 # helper to run an AbstractPass pass on a module
-function MLIR.run(mod::MLIR.MModule, pass::MLIR.AbstractPass)
+function MLIR.run(pass::MLIR.AbstractPass, mod::MLIR.MModule)
     ctx = mod.context
     opname = MLIR.get_opname(pass)
 
@@ -14,17 +14,18 @@ function MLIR.run(mod::MLIR.MModule, pass::MLIR.AbstractPass)
     mlir_pass = MLIR.create_external_pass!(pm, pass, nameof_pass, nameof_pass, "", opname)
 
     if isempty(opname)
-        MLIR.add_owned_pass!(pm, pass)
+        MLIR.add_owned_pass!(pm, mlir_pass)
     else
         @assert MLIR.is_registered_operation(ctx, opname) "$opname is not registered"
-        MLIR.add_owned_pass!(MLIR.OpPassManager(pm, opname), mlir_pass)
+        opm = MLIR.OpPassManager(pm, opname)
+        MLIR.add_owned_pass!(opm, mlir_pass)
     end
 
     MLIR.run(pm, mod)
 end
 
 """
-    ReshapeArgsToRowMajorPass() <: MLIR.AbstractPass
+    TransposeArgsToRowMajorPass() <: MLIR.AbstractPass
 
 This pass replaces the argument for `func.func` operations with a transposed version and
 putting reshape operations at the beginning of the block.
@@ -35,11 +36,11 @@ MType(#= (tensor<2x3xf32>) -> tensor<3x2xf32> =#)
 to:
 MType(#= (tensor<3x2xf32>) -> tensor<3x2xf32> =#)
 """
-struct ReshapeArgsToRowMajorPass <: MLIR.AbstractPass end
+struct TransposeArgsToRowMajorPass <: MLIR.AbstractPass end
 
-MLIR.get_opname(::ReshapeArgsToRowMajorPass) = "func.func"
+MLIR.get_opname(::TransposeArgsToRowMajorPass) = "func.func"
 
-function MLIR.pass_run(ctx::MLIR.Context, ::ReshapeArgsToRowMajorPass, func_op::MLIR.Operation)
+function MLIR.pass_run(ctx::MLIR.Context, ::TransposeArgsToRowMajorPass, func_op::MLIR.Operation)
     block = MLIR.get_first_block(func_op)
     isnothing(block) && return
 
@@ -66,7 +67,8 @@ function MLIR.pass_run(ctx::MLIR.Context, ::ReshapeArgsToRowMajorPass, func_op::
             arg_types[iarg] = new_type
             MLIR.set_type!(arg, new_type)
 
-            reshape_op = mhlo.reshape(ctx, arg, old_shape)
+            perm = reverse(1:ndims(typeof_arg))
+            reshape_op = mhlo.transpose(ctx, arg, perm)
 
             if isnothing(last_reshape_op)
                 pushfirst!(block, reshape_op)
@@ -91,6 +93,58 @@ function MLIR.pass_run(ctx::MLIR.Context, ::ReshapeArgsToRowMajorPass, func_op::
     result_type = MLIR.get_result(ftype, 1)
     new_ftype = MLIR.MType(ctx, arg_types => (result_type,))
     new_ftype_attr = MLIR.Attribute(new_ftype)
+    MLIR.set_attribute_by_name!(func_op, "function_type", new_ftype_attr)
+end
+
+struct TransposeReturnTypePass <: MLIR.AbstractPass end
+
+MLIR.get_opname(::TransposeReturnTypePass) = "func.func"
+
+function MLIR.pass_run(ctx::MLIR.Context, ::TransposeReturnTypePass, func_op::MLIR.Operation)
+    block = MLIR.get_first_block(func_op)
+
+    ret_op = nothing
+    for op in MLIR.OperationIterator(block)
+        if MLIR.get_name(op) == "func.return"
+            ret_op = op
+            break
+        end
+    end
+
+    if isnothing(ret_op) || MLIR.num_operands(ret_op) != 1
+        return
+    end
+
+    operand = MLIR.get_operand(ret_op, 1)
+    ret_type = MLIR.get_type(operand)
+
+    if !MLIR.is_tensor(ret_type) || ndims(ret_type) <= 1
+        return
+    end
+
+    block = MLIR.get_block(ret_op)
+
+    op_shape = size(ret_type)
+    perm = reverse(1:ndims(ret_type))
+
+    transpose_op = mhlo.transpose(ctx, operand, perm)
+    MLIR.insert_before!(block, ret_op, transpose_op)
+
+    new_ret_operand = MLIR.get_result(transpose_op, 1)
+    MLIR.set_operand!(ret_op, 1, new_ret_operand)
+
+    ftype_attr = MLIR.get_attribute_by_name(func_op, "function_type")
+    ftype = MLIR.get_type_value(ftype_attr)
+
+    arg_types = [
+        MLIR.get_input(ftype, i)
+        for i in 1:MLIR.get_num_inputs(ftype)
+    ]
+
+    new_result_type = MLIR.get_type(new_ret_operand)
+    new_ftype = MLIR.MType(ctx, arg_types => (new_result_type,))
+    new_ftype_attr = MLIR.Attribute(new_ftype)
+
     MLIR.set_attribute_by_name!(func_op, "function_type", new_ftype_attr)
 end
 

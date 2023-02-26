@@ -494,7 +494,8 @@ function (call::Call)(args...)
         if arg isa AbstractArray && arg_cconv == IREE_RUNTIME_CALLING_CONVENTION_REF
             set_ref!(
                 call.call.inputs, i,
-                BufferView(call.session, arg),
+                ColMajorBufferView(call.session, arg),
+                # BufferView(call.session, arg),
             )
         elseif arg_cconv != IREE_RUNTIME_CALLING_CONVENTION_REF
             in_value = Ref(to_vm_value(arg))
@@ -531,7 +532,8 @@ function (call::Call)(args...)
             N = Runtime.iree_hal_buffer_view_shape_rank(buffer_view)
             iree_type = Runtime.iree_hal_buffer_view_element_type(buffer_view)
             T = julia_type(iree_type)
-            return BufferView{T,N}(buffer_view, call.session)
+            bf = BufferView{T,N}(buffer_view, call.session)
+            return N > 1 ? adjoint(bf) : bf
         end
 
         out_value = Ref(iree_vm_value_t(Tuple(zero(UInt8) for _ in 1:16)))
@@ -663,6 +665,27 @@ function row_majorize(a::AbstractArray{T,N}) where {T,N}
         out[offset] = a[I]
     end
     return out
+end
+
+function ColMajorBufferView(session, a::AbstractArray{T,N}) where {T,N}
+    out_buffer = Ref(Ptr{iree_hal_buffer_view_t}())
+
+    @iree_check GC.@preserve a out_buffer Runtime.iree_hal_buffer_view_allocate_buffer(
+        Runtime.iree_runtime_session_device_allocator(session),
+        N, collect(Iterators.reverse(size(a))),
+        iree_type(T), Runtime.IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+        Runtime.iree_hal_buffer_params_t(
+            Runtime.IREE_HAL_BUFFER_USAGE_DEFAULT | Runtime.IREE_HAL_BUFFER_USAGE_MAPPING,
+            Runtime.IREE_HAL_MEMORY_ACCESS_READ,
+            Runtime.IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
+            zero(Runtime.iree_hal_queue_affinity_t),
+            zero(Runtime.iree_device_size_t),
+        ),
+        Runtime.iree_const_byte_span_t(pointer(a), sizeof(a)),
+        Base.unsafe_convert(Ptr{Ptr{Runtime.iree_hal_buffer_view_t}}, Base.pointer_from_objref(out_buffer),)
+    )
+
+    BufferView{T,N}(out_buffer[], session)
 end
 
 BufferView(_, view::BufferView) = view

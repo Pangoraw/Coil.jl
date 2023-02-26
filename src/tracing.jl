@@ -73,6 +73,7 @@ using ..MLIR
 import .MLIR: julia_type, get_result, get_type
 
 import ..func, ..mhlo, ..arith, ..math, ..tensor, ..tosa, ..linalg
+import ..Passes
 
 macro loc(ctx)
     source = QuoteNode(__source__)
@@ -551,7 +552,7 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
     elseif f == /
         :divide
     elseif f == *
-        :mul
+        :multiply
     else
         throw("unsupported broadcast function $(f)")
     end
@@ -785,6 +786,14 @@ function compile_tape(tape, args...; verbose=haskey(ENV, "COIL_VERBOSE"))
     func_name = ctx.f isa Function ? nameof(ctx.f) : nameof(typeof(ctx.f))
 
     mlir_module = compile_to_module(tape, args...; verbose)
+
+    # Apply row-major -> col-major passes
+
+    MLIR.run(Passes.TransposeArgsToRowMajorPass(), mlir_module)
+    MLIR.run(Passes.TransposeReturnTypePass(), mlir_module)
+
+    ###
+
     graph_call = get_call(mlir_module, string("module.", func_name))
 
     result_op = tape[tape.result]
@@ -998,8 +1007,6 @@ function compile_to_bytecode(module_; input_type=MLIR.get_input_type(module_))
     ])
 
     IREE.build_vm_pass_pipeline!(op_pass, options)
-
-    @show op_pass
 
     MLIR.run(pm, module_)
     return IREE.translate_module_to_vm_bytecode(module_, options)

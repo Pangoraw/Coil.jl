@@ -299,6 +299,28 @@ function reshape(context, operand, shape; loc=Location(context))
     Operation(state)
 end
 
+function transpose(context, operand, perm; loc=Location(context))
+    state = OperationState("mhlo.transpose", loc)
+
+    input_type = MLIR.get_type(operand)
+    input_shape = size(input_type)
+    out_shape = [
+        input_shape[i]
+        for i in perm
+    ]
+    out_type = MType(context, eltype(input_type), out_shape)
+    MLIR.add_operands!(state, [operand])
+    MLIR.add_results!(state, [out_type])
+    MLIR.add_attributes!(state, [
+        MLIR.NamedAttribute(
+            context, "permutation",
+            MLIR.Attribute(context, collect(Int64.(perm) .- 1)),
+        ),
+    ])
+
+    Operation(state)
+end
+
 function return_(context, operand; loc=Location(context))
     state = OperationState("mhlo.return", loc)
     MLIR.add_operands!(state, [operand])
@@ -324,7 +346,7 @@ function map(context, block, operand, dims=collect(1:ndims(operand)); loc=Locati
     Operation(state)
 end
 
-for f in (:minimum, :maximum, :add, :substract, :divide, :mul)
+for f in (:minimum, :maximum, :add, :substract, :divide, :multiply)
     @eval function $f(context, operands, out_type=MLIR.get_type(first(operands)); loc=Location(context))
         state = OperationState($(string("mhlo.", f)), loc)
         MLIR.add_results!(state, [out_type])

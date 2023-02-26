@@ -861,7 +861,7 @@ end
 PassManager(context) =
     PassManager(LibMLIR.mlirPassManagerCreate(context), context)
 
-function run(pm, module_)
+function run(pm::PassManager, module_)
     status = LibMLIR.mlirPassManagerRun(pm, module_)
     if LibMLIR.mlirLogicalResultIsFailure(status)
         throw("failed to run pass manager on module")
@@ -885,6 +885,7 @@ end
 
 OpPassManager(pm::PassManager) = OpPassManager(LibMLIR.mlirPassManagerGetAsOpPassManager(pm), pm)
 OpPassManager(pm::PassManager, opname) = OpPassManager(LibMLIR.mlirPassManagerGetNestedUnder(pm, opname), pm)
+OpPassManager(opm::OpPassManager, opname) = OpPassManager(LibMLIR.mlirOpPassManagerGetNestedUnder(opm, opname), opm.pass)
 
 Base.convert(::Type{MlirOpPassManager}, op_pass::OpPassManager) = op_pass.op_pass
 
@@ -921,7 +922,9 @@ end
 
 # AbstractPass interface:
 get_opname(::AbstractPass) = ""
-function pass_run(::Context, ::AbstractPass, op) end
+function pass_run(::Context, ::P, op) where {P<:AbstractPass}
+    error("pass $P does not implement `MLIR.pass_run`")
+end
 
 function _pass_construct(ptr::ExternalPassHandle)
     nothing
