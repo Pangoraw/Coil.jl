@@ -4,6 +4,8 @@ include("MLIR/MLIR.jl")
 include("IREE/IREE.jl")
 
 include("dialects.jl")
+include("passes.jl")
+
 include("tracing.jl")
 
 import .Tracing: compile, @code_mlir, @code_linalg, @tape

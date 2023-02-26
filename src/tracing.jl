@@ -962,13 +962,13 @@ end
 function run_pipeline!(module_, pipeline)
     IREE.register_all_dialects!(module_.context)
 
-    pass = MLIR.PassManager(module_.context)
-    MLIR.enable_verifier!(pass)
+    pm = MLIR.PassManager(module_.context)
+    MLIR.enable_verifier!(pm)
 
-    op_pass = MLIR.OpPassManager(pass)
+    op_pass = MLIR.OpPassManager(pm)
     MLIR.add_pipeline!(op_pass, pipeline)
 
-    MLIR.run(pass, module_)
+    MLIR.run(pm, module_)
     module_
 end
 
@@ -990,8 +990,8 @@ function compile_to_bytecode(module_; input_type=MLIR.get_input_type(module_))
         :tosa,
     ) || throw("invalid iree input type ($input_type)")
 
-    pass = MLIR.PassManager(module_.context)
-    op_pass = MLIR.OpPassManager(pass)
+    pm = MLIR.PassManager(module_.context)
+    op_pass = MLIR.OpPassManager(pm)
     options = IREE.CompilerOptions([
         "--iree-hal-target-backends=llvm-cpu",
         string("--iree-input-type=", input_type),
@@ -999,7 +999,9 @@ function compile_to_bytecode(module_; input_type=MLIR.get_input_type(module_))
 
     IREE.build_vm_pass_pipeline!(op_pass, options)
 
-    MLIR.run(pass, module_)
+    @show op_pass
+
+    MLIR.run(pm, module_)
     return IREE.translate_module_to_vm_bytecode(module_, options)
 end
 

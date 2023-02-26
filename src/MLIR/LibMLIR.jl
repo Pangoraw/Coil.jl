@@ -23,7 +23,8 @@ for T in (:MlirContext,
     :MlirPass,
     :MlirExternalPass,
     :MlirPassManager,
-    :MlirOpPassManager,)
+    :MlirOpPassManager,
+    :MlirTypeIDAllocator,)
     @eval struct $T
         ptr::Ptr{Cvoid}
     end
@@ -35,7 +36,9 @@ for T in (:MlirAttribute,
     :MlirLocation,
     :MlirModule,
     :MlirType,
-    :MlirValue,)
+    :MlirValue,
+    :MlirTypeID,
+    :MlirDialectHandle,)
     @eval struct $T
         ptr::Ptr{Cvoid}
     end
@@ -116,6 +119,10 @@ mlirF32TypeGet(context) = @ccall libmlir.mlirF32TypeGet(context::MlirContext)::M
 mlirF64TypeGet(context) = @ccall libmlir.mlirF64TypeGet(context::MlirContext)::MlirType
 mlirFunctionTypeGet(context, nargs, args, nresults, results) =
     @ccall libmlir.mlirFunctionTypeGet(context::MlirContext, nargs::intptr_t, args::Ptr{MlirType}, nresults::intptr_t, results::Ptr{MlirType})::MlirType
+mlirFunctionTypeGetNumResults(ftype) = @ccall libmlir.mlirFunctionTypeGetNumResults(ftype::MlirType)::intptr_t
+mlirFunctionTypeGetNumInputs(ftype) = @ccall libmlir.mlirFunctionTypeGetNumInputs(ftype::MlirType)::intptr_t
+mlirFunctionTypeGetResult(ftype, pos) = @ccall libmlir.mlirFunctionTypeGetResult(ftype::MlirType, pos::intptr_t)::MlirType
+mlirFunctionTypeGetInput(ftype, pos) = @ccall libmlir.mlirFunctionTypeGetInput(ftype::MlirType, pos::intptr_t)::MlirType
 mlirRankedTensorTypeGetChecked(location, rank, shape, eltype, encoding) =
     @ccall libmlir.mlirRankedTensorTypeGetChecked(
         location::MlirLocation,
@@ -150,12 +157,15 @@ mlirTypeIsAF64(type) =
     @ccall libmlir.mlirTypeIsAF64(type::MlirType)::Bool
 mlirTypeIsAIndex(type) =
     @ccall libmlir.mlirTypeIsAIndex(type::MlirType)::Bool
+mlirTypeIsAFunction(type) =
+    @ccall libmlir.mlirTypeIsAFunction(type::MlirType)::Bool
 
 ### Attributes
 
 mlirAttributeGetNull() = @ccall libmlir.mlirAttributeGetNull()::MlirAttribute
 mlirStringAttrGet(context, str) = @ccall libmlir.mlirStringAttrGet(context::MlirContext, str::MlirStringRef)::MlirAttribute
 mlirTypeAttrGet(type) = @ccall libmlir.mlirTypeAttrGet(type::MlirType)::MlirAttribute
+mlirTypeAttrGetValue(attr) = @ccall libmlir.mlirTypeAttrGetValue(attr::MlirAttribute)::MlirType
 mlirAttributeGetContext(attribute) = @ccall libmlir.mlirAttributeGetContext(attribute::MlirAttribute)::MlirContext
 mlirAttributeParseGet(context, str) = @ccall libmlir.mlirAttributeParseGet(context::MlirContext, str::MlirStringRef)::MlirAttribute
 mlirAttributePrint(attribute, callback, userdata) = @ccall libmlir.mlirAttributePrint(attribute::MlirAttribute, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
@@ -244,11 +254,12 @@ mlirValueIsAOpResult(value) = @ccall libmlir.mlirValueIsAOpResult(value::MlirVal
 mlirOpResultGetOwner(value) = @ccall libmlir.mlirOpResultGetOwner(value::MlirValue)::MlirOperation
 mlirValueIsABlockArgument(value) = @ccall libmlir.mlirValueIsABlockArgument(value::MlirValue)::Bool
 mlirBlockArgumentGetOwner(value) = @ccall libmlir.mlirBlockArgumentGetOwner(value::MlirValue)::MlirBlock
+mlirBlockArgumentSetType(value, type) = @ccall libmlir.mlirBlockArgumentSetType(value::MlirValue, type::MlirType)::Cvoid
 
 ### Op Operand
 
 mlirOpOperandIsNull(op_operand) = mlirIsNull(op_operand)
-mlirOpOperandGetOwner(op_operand) = @ccall libmlir.mlirOpOperandGetOwner(op_operand::MlirOpOperand)::MlirValue
+mlirOpOperandGetOwner(op_operand) = @ccall libmlir.mlirOpOperandGetOwner(op_operand::MlirOpOperand)::MlirOperation
 mlirOpOperandGetOperandNumber(op_operand) = @ccall libmlir.mlirOpOperandGetOperandNumber(op_operand::MlirOpOperand)::Cuint
 mlirOpOperandGetNextUse(op_operand) = @ccall libmlir.mlirOpOperandGetNextUse(op_operand::MlirOpOperand)::MlirOpOperand
 
@@ -352,6 +363,8 @@ mlirOperationVerify(operation) = @ccall libmlir.mlirOperationVerify(operation::M
 mlirOperationGetOperand(operation, i) = @ccall libmlir.mlirOperationGetOperand(operation::MlirOperation, i::intptr_t)::MlirValue
 mlirOperationSetOperand(operation, i, value) = @ccall libmlir.mlirOperationSetOperand(operation::MlirOperation, i::intptr_t, value::MlirValue)::Cvoid
 mlirOperationGetNumOperands(operation) = @ccall libmlir.mlirOperationGetNumOperands(operation::MlirOperation)::intptr_t
+mlirOperationGetAttributeByName(operation, name) = @ccall libmlir.mlirOperationGetAttributeByName(operation::MlirOperation, name::MlirStringRef)::MlirAttribute
+mlirOperationSetAttributeByName(operation, name, attribute) = @ccall libmlir.mlirOperationSetAttributeByName(operation::MlirOperation, name::MlirStringRef, attribute::MlirAttribute)::Cvoid
 
 ### Module
 
@@ -365,11 +378,13 @@ mlirModuleGetOperation(module_) = @ccall libmlir.mlirModuleGetOperation(module_:
 ### Pass Manager
 
 mlirPassManagerCreate(context) = @ccall libmlir.mlirPassManagerCreate(context::MlirContext)::MlirPassManager
-mlirPassManagerDestroy(pass) = @ccall libmlir.mlirPassManagerDestroy(pass::MlirPassManager)::Cvoid
-mlirPassManagerIsNull(pass) = mlirIsNull(pass)
-mlirPassManagerGetAsOpPassManager(pass) = @ccall libmlir.mlirPassManagerGetAsOpPassManager(pass::MlirPassManager)::MlirOpPassManager
-mlirPassManagerRun(pass, module_) = @ccall libmlir.mlirPassManagerRun(pass::MlirPassManager, module_::MlirModule)::MlirLogicalResult
-mlirPassManagerEnableVerifier(pass) = @ccall libmlir.mlirPassManagerEnableVerifier(pass::MlirPassManager)::Cvoid
+mlirPassManagerDestroy(pm) = @ccall libmlir.mlirPassManagerDestroy(pm::MlirPassManager)::Cvoid
+mlirPassManagerIsNull(pm) = mlirIsNull(pm)
+mlirPassManagerGetAsOpPassManager(pm) = @ccall libmlir.mlirPassManagerGetAsOpPassManager(pm::MlirPassManager)::MlirOpPassManager
+mlirPassManagerRun(pm, module_) = @ccall libmlir.mlirPassManagerRun(pm::MlirPassManager, module_::MlirModule)::MlirLogicalResult
+mlirPassManagerEnableVerifier(pm) = @ccall libmlir.mlirPassManagerEnableVerifier(pm::MlirPassManager)::Cvoid
+mlirPassManagerAddOwnedPass(pm, pass) = @ccall libmlir.mlirPassManagerAddOwnedPass(pm::MlirPassManager, pass::MlirPass)::Cvoid
+mlirPassManagerGetNestedUnder(pm, opname) = @ccall libmlir.mlirPassManagerGetNestedUnder(pm::MlirPassManager, opname::MlirStringRef)::MlirOpPassManager
 
 ### Op Pass Manager
 
@@ -380,5 +395,74 @@ mlirParsePassPipeline(op_pass, pipeline, callback, userdata) =
     @ccall libmlir.mlirParsePassPipeline(op_pass::MlirOpPassManager, pipeline::MlirStringRef, callback::Ptr{Cvoid}, userdata::Any)::MlirLogicalResult
 mlirPrintPassPipeline(op_pass, callback, userdata) =
     @ccall libmlir.mlirPrintPassPipeline(op_pass::MlirOpPassManager, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
+mlirOpPassManagerAddOwnedPass(op_pass, pass) =
+    @ccall libmlir.mlirOpPassManagerAddOwnedPass(op_pass::MlirOpPassManager, pass::MlirPass)::Cvoid
+
+### TypeID
+
+# `ptr` must be 8 byte aligned and unique to a type valid for the duration of
+#  the returned type id's usage
+mlirTypeIDCreate(ptr) = @ccall libmlir.mlirTypeIDCreate(ptr::MlirTypeIDAllocator)::MlirTypeID
+mlirTypeIDIsNull(typeid) = mlirIsNull(typeid)
+mlirTypeIDEqual(typeid1, typeid2) = @ccall libmlir.mlirTypeIDEqual(typeid1::MlirTypeID, typeid2::MlirTypeID)::Bool
+mlirTypeIDHashValue(typeid) = @ccall libmlir.mlirTypeIDHashValue(typeid::MlirTypeID)::Csize_t
+
+### TypeIDAllocator
+
+mlirTypeIDAllocatorCreate() = @ccall libmlir.mlirTypeIDAllocatorCreate()::MlirTypeIDAllocator
+mlirTypeIDAllocatorDestroy(allocator) = @ccall libmlir.mlirTypeIDAllocatorDestroy(allocator::MlirTypeIDAllocator)::Cvoid
+mlirTypeIDAllocatorAllocateTypeID(allocator) =
+    @ccall libmlir.mlirTypeIDAllocatorAllocateTypeID(allocator::MlirTypeIDAllocator)::MlirTypeID
+
+### Pass
+
+"""
+Structure of external `MlirPass` callbacks.
+All callbacks are required to be set unless otherwise specified.
+"""
+struct MlirExternalPassCallbacks
+    # This callback is called from the pass is created.
+    # This is analogous to a C++ pass constructor.
+    construct::Ptr{Cvoid}
+
+    # This callback is called when the pass is destroyed
+    # This is analogous to a C++ pass destructor.
+    destruct::Ptr{Cvoid}
+
+    # This callback is optional.
+    # The callback is called before the pass is run, allowing a chance to
+    # initialize any complex state necessary for running the pass.
+    # See Pass::initialize(MLIRContext *).
+    initialize::Ptr{Cvoid}
+
+    # This callback is called when the pass is cloned.
+    # See Pass::clonePass().
+    clone::Ptr{Cvoid}
+
+    # This callback is called when the pass is run.
+    # See Pass::runOnOperation().
+    run::Ptr{Cvoid}
+end
+
+# Creates an external `MlirPass` that calls the supplied `callbacks` using the
+# supplied `userData`. If `opName` is empty, the pass is a generic operation
+# pass. Otherwise it is an operation pass specific to the specified pass name.
+function mlirCreateExternalPass(passID, name, argument,
+                       description, opName,
+                       nDependentDialects, dependentDialects,
+                       callbacks, userData)
+    @ccall libmlir.mlirCreateExternalPass(
+        passID::MlirTypeID, name::MlirStringRef, argument::MlirStringRef,
+        description::MlirStringRef, opName::MlirStringRef,
+        nDependentDialects::intptr_t, dependentDialects::Ptr{MlirDialectHandle},
+        callbacks::MlirExternalPassCallbacks, userData::Ptr{Cvoid},
+    )::MlirPass
+end
+
+# This signals that the pass has failed. This is only valid to call during
+# the `run` callback of `MlirExternalPassCallbacks`.
+# See Pass::signalPassFailure().
+mlirExternalPassSignalFailure(pass) =
+    @ccall libmlir.mlirExternalPassSignalFailure(pass::MlirExternalPass)::Cvoid
 
 end # module LibMLIR

@@ -1,5 +1,7 @@
 module MLIR
 
+import Base.Libc.Libdl
+
 include("./LibMLIR.jl")
 
 export
@@ -71,19 +73,28 @@ function Base.show(io::IO, dialect::Dialect)
     print(io, "Dialect(\"", String(LibMLIR.mlirDialectGetNamespace(dialect)), "\")")
 end
 
+### DialectHandle
+
+struct DialectHandle
+    handle::LibMLIR.MlirDialectHandle
+end
+
+function DialectHandle(s::Symbol)
+    libmlir_handle = Libdl.open(libmlir)
+end
+
 ### Context
 
 mutable struct Context
     context::MlirContext
-
-    Context(context) = begin
-        @assert !LibMLIR.mlirContextIsNull(context) "cannot create Context with null MlirContext"
-        finalizer(new(context)) do context
-            LibMLIR.mlirContextDestroy(context.context)
-        end
+end
+function Context()
+    context = LibMLIR.mlirContextCreate()
+    @assert !LibMLIR.mlirContextIsNull(context) "cannot create Context with null MlirContext"
+    finalizer(Context(context)) do context
+        LibMLIR.mlirContextDestroy(context.context)
     end
 end
-Context() = Context(LibMLIR.mlirContextCreate())
 
 Base.convert(::Type{MlirContext}, c::Context) = c.context
 
@@ -237,7 +248,7 @@ function julia_type(type::MType)
         is_signed = LibMLIR.mlirIntegerTypeIsSigned(type) ||
                     LibMLIR.mlirIntegerTypeIsSignless(type)
         width = LibMLIR.mlirIntegerTypeGetWidth(type)
-    
+
         try
             inttype(width, is_signed)
         catch
@@ -269,6 +280,26 @@ end
 
 function is_integer(type::MType)
     LibMLIR.mlirTypeIsAInteger(type)
+end
+
+is_function_type(mtype) = LibMLIR.mlirTypeIsAFunction(mtype)
+
+function get_num_inputs(ftype)
+    @assert is_function_type(ftype) "cannot get the number of inputs on type $(ftype), expected a function type"
+    LibMLIR.mlirFunctionTypeGetNumInputs(ftype)
+end
+function get_num_results(ftype)
+    @assert is_function_type(ftype) "cannot get the number of results on type $(ftype), expected a function type"
+    LibMLIR.mlirFunctionTypeGetNumResults(ftype)
+end
+
+function get_input(ftype::MType, pos)
+    @assert is_function_type(ftype) "cannot get input on type $(ftype), expected a function type"
+    MType(LibMLIR.mlirFunctionTypeGetInput(ftype, pos - 1))
+end
+function get_result(ftype::MType, pos)
+    @assert is_function_type(ftype) "cannot get result on type $(ftype), expected a function type"
+    MType(LibMLIR.mlirFunctionTypeGetResult(ftype, pos - 1))
 end
 
 ### Attribute
@@ -352,6 +383,10 @@ Base.parse(::Type{Attribute}, context, s) =
 function get_type(attribute::Attribute)
     MType(LibMLIR.mlirAttributeGetType(attribute))
 end
+function get_type_value(attribute)
+    @assert LibMLIR.mlirAttributeIsAType(attribute) "attribute $(attribute) is not a type"
+    MType(LibMLIR.mlirTypeAttrGetValue(attribute))
+end
 
 function Base.show(io::IO, attribute::Attribute)
     print(io, "Attribute(#= ")
@@ -402,6 +437,12 @@ end
 is_a_op_result(value) = LibMLIR.mlirValueIsAOpResult(value)
 is_a_block_argument(value) = LibMLIR.mlirValueIsABlockArgument(value)
 
+function set_type!(value, type)
+    @assert is_a_block_argument(value) "could not set type, value is not a block argument"
+    LibMLIR.mlirBlockArgumentSetType(value, type)
+    value
+end
+
 function get_owner(value::Value)
     if is_a_block_argument(value)
         raw_block = LibMLIR.mlirBlockArgumentGetOwner(value)
@@ -434,7 +475,7 @@ end
 uses(value) = UsesIterator(value)
 
 function Base.iterate(it::UsesIterator)
-    op_operand = get_first_use(it)
+    op_operand = get_first_use(it.value)
     if isnothing(op_operand)
         return nothing
     end
@@ -457,6 +498,15 @@ function Base.iterate(::UsesIterator, op_operand)
     )
 end
 
+"""
+Replaces all uses of value with the provided other value.
+"""
+function replace_all_uses!(value, other)
+    for (op, i) in uses(value)
+        set_operand!(op, i, other)
+    end
+end
+
 ### Op Operand
 
 struct OpOperand
@@ -473,7 +523,7 @@ function get_owner(op_operand::OpOperand)
     Operation(raw_op, false)
 end
 
-get_operand_number(op_operand) = LibMLIR.mlirOpOperandGetOperandNumber(op_operand)
+get_operand_number(op_operand) = 1 + LibMLIR.mlirOpOperandGetOperandNumber(op_operand)
 function get_next_use(op_operand)
     next_op_operand = LibMLIR.mlirOpOperandGetNextUse(op_operand)
     if LibMLIR.mlirOpOperandIsNull(next_op_operand)
@@ -529,7 +579,7 @@ end
 
 Operation(state::OperationState) = Operation(LibMLIR.mlirOperationCreate(state), true)
 
-copy(operation) = Operation(LibMLIR.mlirOperationClone(operation))
+Base.copy(operation::Operation) = Operation(LibMLIR.mlirOperationClone(operation))
 
 num_regions(operation) = LibMLIR.mlirOperationGetNumRegions(operation)
 function get_region(operation, i)
@@ -541,7 +591,7 @@ get_results(operation) = [
     get_result(operation, i)
     for i in 1:num_results(operation)
 ]
-function get_result(operation, i)
+function get_result(operation::Operation, i)
     i ∉ 1:num_results(operation) && throw(BoundsError(operation, i))
     Value(LibMLIR.mlirOperationGetResult(operation, i - 1))
 end
@@ -556,11 +606,36 @@ function set_operand!(operation, i, value)
     value
 end
 
+get_attribute_by_name(operation, name) = Attribute(LibMLIR.mlirOperationGetAttributeByName(operation, name))
+function set_attribute_by_name!(operation, name, attribute)
+    LibMLIR.mlirOperationSetAttributeByName(operation, name, attribute)
+    operation
+end
+
 get_location(operation) = Location(LibMLIR.mlirOperationGetLocation(operation))
 get_name(operation) = String(LibMLIR.mlirOperationGetName(operation))
 get_block(operation) = Block(LibMLIR.mlirOperationGetBlock(operation), false)
 get_parent_operation(operation) = Operation(LibMLIR.mlirOperationGetParentOperation(operation), false)
 get_dialect(operation) = first(split(get_name(operation), '.')) |> Symbol
+
+function get_first_region(op::Operation)
+    reg = iterate(RegionIterator(op))
+    isnothing(reg) && return nothing
+    first(reg)
+end
+function get_first_block(op::Operation)
+    reg = get_first_region(op)
+    isnothing(reg) && return nothing
+    block = iterate(BlockIterator(reg))
+    isnothing(block) && return nothing
+    first(block)
+end
+function get_first_child_op(op::Operation)
+    block = get_first_block(op)
+    isnothing(block) && return nothing
+    cop = iterate(OperationIterator(block))
+    first(cop)
+end
 
 op::Operation == other::Operation = LibMLIR.mlirOperationEqual(op, other)
 
@@ -609,7 +684,11 @@ function Base.push!(block::Block, op::Operation)
     op
 end
 function Base.insert!(block::Block, pos, op::Operation)
-    LibMLIR.mlirBlockInsertOwnedOperation(block, pos, lose_ownership!(op))
+    LibMLIR.mlirBlockInsertOwnedOperation(block, pos - 1, lose_ownership!(op))
+    op
+end
+function Base.pushfirst!(block::Block, op::Operation)
+    insert!(block, 1, op)
     op
 end
 function insert_after!(block::Block, reference::Operation, op::Operation)
@@ -666,14 +745,24 @@ function Base.push!(region::Region, block::Block)
     LibMLIR.mlirRegionAppendOwnedBlock(region, lose_ownership!(block))
     block
 end
-Base.insert!(region::Region, pos, block::Block) =
-    LibMLIR.mlirRegionInsertOwnedBlock(region, pos, lose_ownership!(block))
+function Base.insert!(region::Region, pos, block::Block)
+    LibMLIR.mlirRegionInsertOwnedBlock(region, pos - 1, lose_ownership!(block))
+    block
+end
+function Base.pushfirst!(region::Region, block)
+    insert!(region, 1, block)
+    block
+end
 insert_after!(region::Region, reference::Block, block::Block) =
     LibMLIR.mlirRegionInsertOwnedBlockAfter(region, reference, lose_ownership!(block))
 insert_before!(region::Region, reference::Block, block::Block) =
     LibMLIR.mlirRegionInsertOwnedBlockBefore(region, reference, lose_ownership!(block))
 
-get_first_block(region::Region) = Block(LibMLIR.mlirRegionGetFirstBlock(region), false)
+function get_first_block(region::Region)
+    block = iterate(BlockIterator(region))
+    isnothing(block) && return nothing
+    first(block)
+end
 
 function lose_ownership!(region::Region)
     @assert region.owned
@@ -699,43 +788,85 @@ MModule(context::Context, loc=Location(context)) =
     MModule(LibMLIR.mlirModuleCreateEmpty(loc), context)
 get_operation(module_) = Operation(LibMLIR.mlirModuleGetOperation(module_), false)
 get_body(module_) = Block(LibMLIR.mlirModuleGetBody(module_), false)
+get_first_child_op(mod::MModule) = get_first_child_op(get_operation(mod))
 
 Base.convert(::Type{MlirModule}, module_::MModule) = module_.module_
 Base.parse(::Type{MModule}, context, module_) = MModule(LibMLIR.mlirModuleCreateParse(context, module_), context)
+
+macro mlir_str(code)
+    quote
+        ctx = Context()
+        parse(MModule, ctx, code)
+    end
+end
 
 function Base.show(io::IO, module_::MModule)
     println(io, "MModule:")
     show(io, get_operation(module_))
 end
 
+### TypeID
+
+struct TypeID
+    typeid::LibMLIR.MlirTypeID
+end
+
+Base.hash(typeid::TypeID) = LibMLIR.mlirTypeIDHashValue(typeid.typeid)
+Base.convert(::Type{LibMLIR.MlirTypeID}, typeid::TypeID) = typeid.typeid
+
+### TypeIDAllocator
+
+mutable struct TypeIDAllocator
+    allocator::LibMLIR.MlirTypeIDAllocator
+
+    function TypeIDAllocator()
+        ptr = LibMLIR.mlirTypeIDAllocatorCreate()
+        @assert ptr != C_NULL "cannot create TypeIDAllocator"
+        finalizer(LibMLIR.mlirTypeIDAllocatorDestroy, new(ptr))
+    end
+end
+
+Base.convert(::Type{LibMLIR.MlirTypeIDAllocator}, allocator::TypeIDAllocator) = allocator.allocator
+
+TypeID(allocator::TypeIDAllocator) = TypeID(LibMLIR.mlirTypeIDCreate(allocator))
+
 ### Pass Manager
+
+abstract type AbstractPass end
+
+mutable struct ExternalPassHandle
+    ctx::Union{Nothing,Context}
+    pass::AbstractPass
+end
 
 mutable struct PassManager
     pass::MlirPassManager
     context::Context
+    allocator::TypeIDAllocator
+    passes::Dict{TypeID,ExternalPassHandle}
 
-    PassManager(pass::MlirPassManager, context) = begin
-        @assert !LibMLIR.mlirPassManagerIsNull(pass) "cannot create PassManager with null MlirPassManager"
-        finalizer(new(pass, context)) do pass
-            LibMLIR.mlirPassManagerDestroy(pass.pass)
+    PassManager(pm::MlirPassManager, context) = begin
+        @assert !LibMLIR.mlirPassManagerIsNull(pm) "cannot create PassManager with null MlirPassManager"
+        finalizer(new(pm, context, TypeIDAllocator(), Dict{TypeID,ExternalPassHandle}())) do pm
+            LibMLIR.mlirPassManagerDestroy(pm.pass)
         end
     end
 end
 
-function enable_verifier!(pass)
-    LibMLIR.mlirPassManagerEnableVerifier(pass)
-    pass
+function enable_verifier!(pm)
+    LibMLIR.mlirPassManagerEnableVerifier(pm)
+    pm
 end
 
 PassManager(context) =
     PassManager(LibMLIR.mlirPassManagerCreate(context), context)
 
-function run(pass, module_)
-    status = LibMLIR.mlirPassManagerRun(pass, module_)
+function run(pm, module_)
+    status = LibMLIR.mlirPassManagerRun(pm, module_)
     if LibMLIR.mlirLogicalResultIsFailure(status)
         throw("failed to run pass manager on module")
     end
-    return nothing
+    module_
 end
 
 Base.convert(::Type{MlirPassManager}, pass::PassManager) = pass.pass
@@ -752,7 +883,8 @@ struct OpPassManager
     end
 end
 
-OpPassManager(pass::PassManager) = OpPassManager(LibMLIR.mlirPassManagerGetAsOpPassManager(pass), pass)
+OpPassManager(pm::PassManager) = OpPassManager(LibMLIR.mlirPassManagerGetAsOpPassManager(pm), pm)
+OpPassManager(pm::PassManager, opname) = OpPassManager(LibMLIR.mlirPassManagerGetNestedUnder(pm, opname), pm)
 
 Base.convert(::Type{MlirOpPassManager}, op_pass::OpPassManager) = op_pass.op_pass
 
@@ -783,6 +915,76 @@ function add_pipeline!(op_pass::OpPassManager, pipeline)
         throw(exc)
     end
     op_pass
+end
+
+### Pass
+
+# AbstractPass interface:
+get_opname(::AbstractPass) = ""
+function pass_run(::Context, ::AbstractPass, op) end
+
+function _pass_construct(ptr::ExternalPassHandle)
+    nothing
+end
+
+function _pass_destruct(ptr::ExternalPassHandle)
+    nothing
+end
+
+function _pass_initialize(ctx, handle::ExternalPassHandle)
+    try
+        handle.ctx = Context(ctx)
+        LibMLIR.mlirLogicalResultSuccess()
+    catch
+        LibMLIR.mlirLogicalResultFailure()
+    end
+end
+
+function _pass_clone(handle::ExternalPassHandle)
+    ExternalPassHandle(handle.ctx, deepcopy(handle.pass))
+end
+
+function _pass_run(rawop, external_pass, handle::ExternalPassHandle)
+    op = Operation(rawop, false)
+    try
+        pass_run(handle.ctx, handle.pass, op)
+    catch ex
+        @error "Something went wrong running pass" exception=(ex,catch_backtrace())
+        LibMLIR.mlirExternalPassSignalFailure(external_pass)
+    end
+    nothing
+end
+
+function create_external_pass!(oppass::OpPassManager, args...)
+    create_external_pass!(oppass.pass, args...)
+end
+function create_external_pass!(manager, pass, name, argument,
+                               description, opname=get_opname(pass),
+                               dependent_dialects=LibMLIR.MlirDialectHandle[])
+    passid = TypeID(manager.allocator)
+    callbacks = LibMLIR.MlirExternalPassCallbacks(
+            @cfunction(_pass_construct, Cvoid, (Any,)),
+            @cfunction(_pass_destruct, Cvoid, (Any,)),
+            @cfunction(_pass_initialize, LibMLIR.MlirLogicalResult, (MlirContext, Any,)),
+            @cfunction(_pass_clone, Any, (Any,)),
+            @cfunction(_pass_run, Cvoid, (MlirOperation, LibMLIR.MlirExternalPass, Any))
+    )
+    pass_handle = manager.passes[passid] = ExternalPassHandle(nothing, pass)
+    userdata = Base.pointer_from_objref(pass_handle)
+    mlir_pass = LibMLIR.mlirCreateExternalPass(passid, name, argument, description, opname,
+                                               length(dependent_dialects), dependent_dialects,
+                                               callbacks, userdata)
+    mlir_pass
+end
+
+function add_owned_pass!(pm::PassManager, pass)
+    LibMLIR.mlirPassManagerAddOwnedPass(pm, pass)
+    pm
+end
+
+function add_owned_pass!(opm::OpPassManager, pass)
+    LibMLIR.mlirOpPassManagerAddOwnedPass(opm, pass)
+    opm
 end
 
 ### Iterators
