@@ -375,6 +375,11 @@ function Attribute(context, value::Int, type::MType)
         LibMLIR.mlirIntegerAttrGet(type, value)
     )
 end
+function Attribute(context, value::Bool)
+    Attribute(
+        LibMLIR.mlirBoolAttrGet(context, value)
+    )
+end
 
 Base.convert(::Type{MlirAttribute}, attribute::Attribute) = attribute.attribute
 Base.parse(::Type{Attribute}, context, s) =
@@ -386,6 +391,14 @@ end
 function get_type_value(attribute)
     @assert LibMLIR.mlirAttributeIsAType(attribute) "attribute $(attribute) is not a type"
     MType(LibMLIR.mlirTypeAttrGetValue(attribute))
+end
+function get_bool_value(attribute)
+    @assert LibMLIR.mlirAttributeIsABool(attribute) "attribute $(attribute) is not a boolean"
+    LibMLIR.mlirBoolAttrGetValue(attribute)
+end
+function get_string_value(attribute)
+    @assert LibMLIR.mlirAttributeIsAString(attribute) "attribute $(attribute) is not a string attribute"
+    String(LibMLIR.mlirStringAttrGetValue(attribute))
 end
 
 function Base.show(io::IO, attribute::Attribute)
@@ -606,7 +619,13 @@ function set_operand!(operation, i, value)
     value
 end
 
-get_attribute_by_name(operation, name) = Attribute(LibMLIR.mlirOperationGetAttributeByName(operation, name))
+function get_attribute_by_name(operation, name)
+    raw_attr = LibMLIR.mlirOperationGetAttributeByName(operation, name)
+    if LibMLIR.mlirAttributeIsNull(raw_attr)
+        return nothing
+    end
+    Attribute(raw_attr)
+end
 function set_attribute_by_name!(operation, name, attribute)
     LibMLIR.mlirOperationSetAttributeByName(operation, name, attribute)
     operation

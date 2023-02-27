@@ -94,7 +94,11 @@ function MLIR.pass_run(ctx::MLIR.Context, ::TransposeArgsToRowMajorPass, func_op
     new_ftype = MLIR.MType(ctx, arg_types => (result_type,))
     new_ftype_attr = MLIR.Attribute(new_ftype)
     MLIR.set_attribute_by_name!(func_op, "function_type", new_ftype_attr)
+    MLIR.set_attribute_by_name!(func_op, COIL_ARGS_TRANSPOSED_ATTR_NAME, MLIR.Attribute(ctx, true))
 end
+
+const COIL_ARGS_TRANSPOSED_ATTR_NAME =  "coil_args_transposed"
+const COIL_RETURN_TRANSPOSED_ATTR_NAME = "coil_return_transposed"
 
 struct TransposeReturnTypePass <: MLIR.AbstractPass end
 
@@ -124,7 +128,6 @@ function MLIR.pass_run(ctx::MLIR.Context, ::TransposeReturnTypePass, func_op::ML
 
     block = MLIR.get_block(ret_op)
 
-    op_shape = size(ret_type)
     perm = reverse(1:ndims(ret_type))
 
     transpose_op = mhlo.transpose(ctx, operand, perm)
@@ -146,6 +149,7 @@ function MLIR.pass_run(ctx::MLIR.Context, ::TransposeReturnTypePass, func_op::ML
     new_ftype_attr = MLIR.Attribute(new_ftype)
 
     MLIR.set_attribute_by_name!(func_op, "function_type", new_ftype_attr)
+    MLIR.set_attribute_by_name!(func_op, COIL_RETURN_TRANSPOSED_ATTR_NAME, MLIR.Attribute(ctx, true))
 end
 
 end # module Passes

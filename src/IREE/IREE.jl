@@ -381,12 +381,19 @@ struct Call
     call::iree_runtime_call_t
     session::Session
 
-    Call(call, session) = begin
+    args_transposed::Bool
+    return_transposed::Bool
+
+    Call(call, session, args_transposed=false, return_transposed=false) = begin
         new(finalizer(call) do call
                 iree_runtime_call_deinitialize(
                     Base.pointer_from_objref(call)
                 )
-            end, session)
+            end,
+            session,
+            args_transposed,
+            return_transposed,
+        )
     end
 end
 
@@ -395,7 +402,7 @@ function Base.show(io::IO, call::Call)
     print(io, "Call(#= $arguments_count => $results_count =#)")
 end
 
-function Call(session::Session, full_name)
+function Call(session::Session, full_name, args_transposed=false, return_transposed=false)
     out_call = iree_runtime_call_t(
         Ptr{iree_runtime_session_t}(),
         iree_vm_function_t(Ptr{iree_vm_module_t}(), zero(UInt16), zero(UInt16)),
@@ -410,7 +417,7 @@ function Call(session::Session, full_name)
         )
     end
     @assert out_call.session == session.session
-    Call(out_call, session)
+    Call(out_call, session, args_transposed, return_transposed)
 end
 
 Base.unsafe_convert(::Type{Ptr{iree_runtime_call_t}}, call::Call) =
@@ -473,8 +480,6 @@ function set_ref!(list, i, view)
         Base.pointer_from_objref(value),
     )
 
-    ref_type_name = String(Runtime.iree_vm_ref_type_name(value[].type))
-
     @iree_check GC.@preserve value Runtime.iree_vm_list_set_ref_retain(
         list, i - 1, Base.pointer_from_objref(value)
     )
@@ -494,8 +499,9 @@ function (call::Call)(args...)
         if arg isa AbstractArray && arg_cconv == IREE_RUNTIME_CALLING_CONVENTION_REF
             set_ref!(
                 call.call.inputs, i,
-                ColMajorBufferView(call.session, arg),
-                # BufferView(call.session, arg),
+                call.args_transposed ?
+                ColMajorBufferView(call.session, arg) :
+                BufferView(call.session, arg),
             )
         elseif arg_cconv != IREE_RUNTIME_CALLING_CONVENTION_REF
             in_value = Ref(to_vm_value(arg))
@@ -533,7 +539,7 @@ function (call::Call)(args...)
             iree_type = Runtime.iree_hal_buffer_view_element_type(buffer_view)
             T = julia_type(iree_type)
             bf = BufferView{T,N}(buffer_view, call.session)
-            return N > 1 ? adjoint(bf) : bf
+            return call.return_transposed && N > 1 ? ColMajorBufferView{T,N}(bf) : bf
         end
 
         out_value = Ref(iree_vm_value_t(Tuple(zero(UInt8) for _ in 1:16)))
@@ -580,6 +586,10 @@ mutable struct BufferView{T,N} <: AbstractArray{T,N}
             Runtime.iree_hal_buffer_view_release(view.view)
         end
     end
+end
+
+struct ColMajorBufferView{T,N} <: AbstractArray{T,N}
+    view::BufferView{T,N}
 end
 
 using .Runtime:
@@ -656,7 +666,7 @@ function row_majorize(a::AbstractArray{T,N}) where {T,N}
     prev = 1
     for i in N:-1:1
         strides[i] = prev
-        prev *= size(a,i)
+        prev *= size(a, i)
     end
 
     out = similar(a)
@@ -685,7 +695,9 @@ function ColMajorBufferView(session, a::AbstractArray{T,N}) where {T,N}
         Base.unsafe_convert(Ptr{Ptr{Runtime.iree_hal_buffer_view_t}}, Base.pointer_from_objref(out_buffer),)
     )
 
-    BufferView{T,N}(out_buffer[], session)
+    ColMajorBufferView{T,N}(
+        BufferView{T,N}(out_buffer[], session)
+    )
 end
 
 BufferView(_, view::BufferView) = view
@@ -693,7 +705,7 @@ function BufferView(session, a::AbstractArray{T,N}) where {T,N}
     # Unfortunately, IREE does not support IREE_HAL_ENCODING_TYPE_DENSE_COLUMN_MAJOR
     # we therefore have to load the buffers in such a way that the data is in row major
     row_major_a = N > 1 ?
-        row_majorize(a) : a
+                  row_majorize(a) : a
 
     out_buffer = Ref(Ptr{iree_hal_buffer_view_t}())
 
@@ -715,6 +727,7 @@ function BufferView(session, a::AbstractArray{T,N}) where {T,N}
     BufferView{T,N}(out_buffer[], session)
 end
 
+Base.size(cf::ColMajorBufferView) = reverse(size(cf.view))
 function Base.size(view::BufferView)
     ndims = Runtime.iree_hal_buffer_view_shape_rank(view)
     dims_ptr = Runtime.iree_hal_buffer_view_shape_dims(view)
@@ -764,6 +777,9 @@ function dump_view(buffer_view::Ptr{iree_hal_buffer_view_t})
     nothing
 end
 
+Base.getindex(view::ColMajorBufferView, I::CartesianIndex) = Base.getindex(view, Tuple(I)...)
+Base.getindex(view::ColMajorBufferView, I...) = Base.getindex(view.view, Iterators.reverse(I)...)
+
 Base.getindex(view::BufferView, I::CartesianIndex) = Base.getindex(view, Tuple(I)...)
 function Base.getindex(view::BufferView{T,N}, I...) where {T,N}
     Base.checkbounds(view, I...)
@@ -798,6 +814,7 @@ function Base.getindex(view::BufferView{T,N}, I...) where {T,N}
     only(val)
 end
 
+Base.unsafe_convert(PT::Type{Ptr{T}}, view::ColMajorBufferView) where {T<:Union{Cvoid,iree_hal_buffer_view_t}} = Base.unsafe_convert(PT, view.view)
 Base.unsafe_convert(::Type{Ptr{T}}, view::BufferView) where {T<:Union{Cvoid,iree_hal_buffer_view_t}} = Ptr{T}(view.view)
 
 function vm_value_with_type(f, type)

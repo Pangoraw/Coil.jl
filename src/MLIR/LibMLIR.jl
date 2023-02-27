@@ -162,8 +162,11 @@ mlirTypeIsAFunction(type) =
 
 ### Attributes
 
+mlirAttributeIsNull(attr) = mlirIsNull(attr)
 mlirAttributeGetNull() = @ccall libmlir.mlirAttributeGetNull()::MlirAttribute
 mlirStringAttrGet(context, str) = @ccall libmlir.mlirStringAttrGet(context::MlirContext, str::MlirStringRef)::MlirAttribute
+mlirAttributeIsAString(attr) = @ccall libmlir.mlirAttributeIsAString(attr::MlirAttribute)::Bool
+mlirStringAttrGetValue(attr) = @ccall libmlir.mlirStringAttrGetValue(attr::MlirAttribute)::MlirStringRef
 mlirTypeAttrGet(type) = @ccall libmlir.mlirTypeAttrGet(type::MlirType)::MlirAttribute
 mlirTypeAttrGetValue(attr) = @ccall libmlir.mlirTypeAttrGetValue(attr::MlirAttribute)::MlirType
 mlirAttributeGetContext(attribute) = @ccall libmlir.mlirAttributeGetContext(attribute::MlirAttribute)::MlirContext
@@ -194,6 +197,9 @@ mlirAttributeIsAFloat(attribute) =
     @ccall libmlir.mlirAttributeIsAFloat(attribute::MlirAttribute)::Bool
 mlirArrayAttrGet(context, nelements, elements) =
     @ccall libmlir.mlirArrayAttrGet(context::MlirContext, nelements::intptr_t, elements::Ptr{MlirAttribute})::MlirAttribute
+mlirBoolAttrGet(context, value) = @ccall libmlir.mlirBoolAttrGet(context::MlirContext, value::Cint)::MlirAttribute
+mlirAttributeIsABool(attribute) = @ccall libmlir.mlirAttributeIsABool(attribute::MlirAttribute)::Bool
+mlirBoolAttrGetValue(attribute) = @ccall libmlir.mlirBoolAttrGetValue(attribute::MlirAttribute)::Bool
 
 ### Identifier
 

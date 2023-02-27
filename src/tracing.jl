@@ -134,7 +134,7 @@ function Umlaut.isprimitive(c::Context, f, args...)
         f in primitives ||
         f isa DataType ||
         which(lower_call!, (Any, OpConfig{typeof(f)}, Umlaut.Call)) !=
-            which(lower_call!, (Any, OpConfig{typeof(_not_a_primitive)}, Umlaut.Call))
+        which(lower_call!, (Any, OpConfig{typeof(_not_a_primitive)}, Umlaut.Call))
 end
 
 function is_tensor(tape::Tape{Context}, v::Umlaut.Variable)
@@ -707,14 +707,46 @@ function lower_call!(cg, ::OpConfig{typeof(reshape)}, op)
         d == Colon() ? all_elements ÷ num_elements : d
         for d in out_size
     ]
+    rev_perm = length(out_size):-1:1
 
-    push!(
+    # https://www.tensorflow.org/mlir/hlo_ops#mhloreshape_mlirmhloreshapeop
+    # the semantics of the mhlo.reshape op means that we need to convert to
+    # row major before resizing so that the right element order is used.
+    # see https://www.tensorflow.org/xla/operation_semantics#reshape
+    # for more information
+
+    operand = if length(current_size) > 1
+        perm = length(current_size):-1:1
+        transpose_op = push!(
+            block,
+            mhlo.transpose(
+                mlir_ctx, operand, perm;
+                loc=Location(mlir_ctx, op.line)
+            ),
+        )
+        get_result(transpose_op, 1)
+    else
+        operand
+    end
+    reshape_op = push!(
         block,
         mhlo.reshape(
-            mlir_ctx, operand, out_size;
+            mlir_ctx, operand,
+            reverse(out_size);
             loc=Location(mlir_ctx, op.line)
         ),
     )
+    if length(out_size) > 1
+        push!(
+            block,
+            mhlo.transpose(
+                mlir_ctx, get_result(reshape_op, 1), rev_perm;
+                loc=Location(mlir_ctx, op.line)
+            )
+        )
+    else
+        reshape_op
+    end
 end
 
 function lower_call!(cg, op)
@@ -1021,12 +1053,34 @@ function get_session()
 end
 
 function get_call(module_, name)
+    mod_op = MLIR.get_operation(module_)
+    block = MLIR.get_first_block(mod_op)
+
+    realname = chopprefix(name, "module.")
+
+    args_transposed = false
+    return_transposed = false
+    for op in MLIR.OperationIterator(block)
+        if MLIR.get_name(op) == "func.func"
+            funcname = MLIR.get_attribute_by_name(op, "sym_name")
+            if isnothing(funcname) || MLIR.get_string_value(funcname) != realname
+                continue
+            end
+
+            args_transposed_attr = MLIR.get_attribute_by_name(op, Passes.COIL_ARGS_TRANSPOSED_ATTR_NAME)
+            args_transposed = !isnothing(args_transposed_attr) && MLIR.get_bool_value(args_transposed_attr)
+
+            return_transposed_attr = MLIR.get_attribute_by_name(op, Passes.COIL_RETURN_TRANSPOSED_ATTR_NAME)
+            return_transposed = !isnothing(return_transposed_attr) && MLIR.get_bool_value(return_transposed_attr)
+        end
+    end
+
     bytecode = compile_to_bytecode(module_)
     session = get_session()
 
     IREE.append_bytecode!(session, bytecode)
 
-    return IREE.Call(session, name)
+    return IREE.Call(session, name, args_transposed, return_transposed)
 end
 
 """

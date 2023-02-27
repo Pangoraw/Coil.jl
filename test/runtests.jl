@@ -46,17 +46,18 @@ end
 
 @testset "Tracing: Flatten" begin
     flatten(x) = reshape(x, :)
-    cflatten = Coil.compile(flatten; verbose=true)
+    cflatten = Coil.compile(flatten; verbose=false)
     x = Int32[1 4; 2 5; 3 6]
     @test cflatten(x) == flatten(x)
-    @test_broken cflatten(x) == flatten(x)
+    @test cflatten(x) == flatten(x)
 end
 
 @testset "Tracing: reshape" begin
-  f(x) = reshape(x, 10, 10, 2)
+  W, H, N = 2, 3, 1
+  f(x) = reshape(x, W, H, N)
   cf = Coil.compile(f; verbose=false)
 
-  x = randn(Float32, 10 * 10 * 2)
+  x = Int32.(1:(W*H*N)) # randn(Float32, 10 * 10 * 2)
   @test f(x) == cf(x)
-  @test_broken f(x) == cf(x)
+  @test f(x) == cf(x)
 end
