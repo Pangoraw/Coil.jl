@@ -190,6 +190,23 @@ function reduce_sum(context, input, axis; loc=Location(context))
     Operation(state)
 end
 
+#=
+#https://mlir.llvm.org/docs/Dialects/TOSA/#tosamax_pool2d-mlirtosamaxpool2dop
+function maxpool_2d(context, operand, kernel, stride, pad; loc=Location(context))
+    state = OperationState("tosa.maxpool_2d", loc)
+    add_operands!(state, [operand])
+    add_attributes!(state, [
+        NamedAttribute(context, "kernel", Attribute(context, kernel)),
+        NamedAttribute(context, "stride", Attribute(context, stride))
+        NamedAttribute(context, "pad", Attribute(context, pad))
+    ])
+    input_type = get_type(operand)
+    input_size = input_size
+    add_results!(state, [output_type])
+    Operation(state)
+end
+=#
+
 end # module tosa
 
 module linalg
@@ -268,6 +285,39 @@ function extract(context, operand, I...; loc=Location(context))
     state = OperationState("tensor.extract", loc)
     MLIR.add_results!(state, [eltype(get_type(operand))])
     MLIR.add_operands!(state, [operand, I...])
+    Operation(state)
+end
+
+# Using https://mlir.llvm.org/docs/Dialects/TensorOps/#tensorcollapse_shape-mlirtensorcollapseshapeop
+function transpose(context, operand, perm; loc=Location(context))
+    reassociation = [[d] for d in perm]
+    tensor.collapse_shape(context, operand, reassociation; loc)
+end
+
+# https://mlir.llvm.org/docs/Dialects/TensorOps/#tensorcollapse_shape-mlirtensorcollapseshapeop
+function collapse_shape(context, operand, reassociation; loc=Location(context))
+    state = OperationState("tensor.collapse_shape", loc)
+    MLIR.add_operands!(state, [operand])
+    MLIR.add_attributes!(state, [
+        MLIR.NamedAttribute(
+            context, "reassociation",
+            MLIR.ArrayAttribute(
+                context,
+                [MLIR.ArrayAttribute(context, Int64.(dim_assoc .- 1))
+                 for dim_assoc in reassociation],
+            ),
+        )
+    ])
+
+    input_type = MLIR.get_type(operand)
+    input_size = size(input_type)
+    output_size = [
+        prod([input_size[i] for i in dim_assoc])
+        for dim_assoc in reassociation
+    ]
+    output_type = MType(context, eltype(input_type), output_size)
+    MLIR.add_results!(state, [output_type])
+
     Operation(state)
 end
 
@@ -355,7 +405,40 @@ for f in (:minimum, :maximum, :add, :substract, :divide, :multiply)
     end
 end
 
-function convolution(context, output_type, operands; loc=Location(context))
+function reduce_window(
+    context,
+    operands,
+    region,
+    window_dimensions,
+    window_strides,
+    base_dilations,
+    window_dilations,
+    padding,
+    output_type;
+    loc=Location(context)
+)
+    state = OperationState("mhlo.reduce_window", loc)
+    add_owned_regions!(state, [region])
+    add_results!(state, [output_type])
+    add_attributes!(state, [
+        NamedAttribute(context, "window_dimensions", Attribute(context, collect(Int64.(window_dimensions)))),
+        NamedAttribute(context, "window_strides", Attribute(context, collect(Int64.(window_strides)))),
+        NamedAttribute(context, "base_dilations", Attribute(context, collect(Int64.(base_dilations)))),
+        NamedAttribute(context, "window_dilations", Attribute(context, collect(Int64.(window_dilations)))),
+        NamedAttribute(context, "padding", Attribute(context, collect(Int64.(padding)))),
+    ])
+    add_operands!(state, collect(operands))
+    Operation(state)
+end
+
+function convolution(
+    context,
+    output_type,
+    operands,
+    padding,
+    rhs_dilation,
+    window_strides; loc=Location(context)
+)
     state = OperationState("mhlo.convolution", loc)
     MLIR.add_attributes!(state, [
         NamedAttribute(context, "batch_group_count", Attribute(context, 1)),
@@ -367,8 +450,8 @@ function convolution(context, output_type, operands; loc=Location(context))
               input_batch_dimension = 3,
               input_feature_dimension = 2,
               input_spatial_dimensions = [0, 1],
-              kernel_input_feature_dimension = 2,
               kernel_output_feature_dimension = 3,
+              kernel_input_feature_dimension = 2,
               kernel_spatial_dimensions = [0, 1],
               output_batch_dimension = 3,
               output_feature_dimension = 2,
@@ -377,28 +460,14 @@ function convolution(context, output_type, operands; loc=Location(context))
             """
         )),
         NamedAttribute(context, "feature_group_count", Attribute(context, 1)),
-        NamedAttribute(context, "padding", Attribute(context, zeros(Int64, 2, 2))),
-        NamedAttribute(context, "rhs_dilation", Attribute(context, [1, 1])),
-        NamedAttribute(context, "window_strides", Attribute(context, [1, 1])),
+        NamedAttribute(context, "padding", Attribute(context, padding)),
+        NamedAttribute(context, "rhs_dilation", Attribute(context, rhs_dilation)),
+        NamedAttribute(context, "window_strides", Attribute(context, window_strides)),
+        # NamedAttribute(context, "feature_group_count", Attribute(context, 1)),
+        # NamedAttribute(context, "padding", Attribute(context, fill(2, 2, 2))),
+        # NamedAttribute(context, "rhs_dilation", Attribute(context, )),
+        # NamedAttribute(context, "window_strides", Attribute(context, [4, 4])),
     ])
-    #=
-    batch_group_count = 1 : i64,
-    dimension_numbers = #mhlo.conv<raw
-      input_batch_dimension = 0,
-      input_feature_dimension = 3,
-      input_spatial_dimensions = [1, 2],
-      kernel_input_feature_dimension = 2,
-      kernel_output_feature_dimension = 3,
-      kernel_spatial_dimensions = [0, 1],
-      output_batch_dimension = 0,
-      output_feature_dimension = 3,
-      output_spatial_dimensions = [1, 2]
-    >,
-    feature_group_count = 1 : i64,
-    padding = dense<[[0, 0], [0, 0]]> : tensor<2x2xi64>,
-    rhs_dilation = dense<1> : tensor<2xi64>,
-    window_strides = dense<1> : tensor<2xi64>
-    =#
     MLIR.add_results!(state, [output_type])
     MLIR.add_operands!(state, operands)
     Operation(state)

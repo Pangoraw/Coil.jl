@@ -297,7 +297,7 @@ function get_input(ftype::MType, pos)
     @assert is_function_type(ftype) "cannot get input on type $(ftype), expected a function type"
     MType(LibMLIR.mlirFunctionTypeGetInput(ftype, pos - 1))
 end
-function get_result(ftype::MType, pos)
+function get_result(ftype::MType, pos=1)
     @assert is_function_type(ftype) "cannot get result on type $(ftype), expected a function type"
     MType(LibMLIR.mlirFunctionTypeGetResult(ftype, pos - 1))
 end
@@ -365,6 +365,11 @@ function ArrayAttribute(context, values::AbstractVector{Int})
         LibMLIR.mlirArrayAttrGet(context, length(elements), elements)
     )
 end
+function ArrayAttribute(context, attributes::Vector{Attribute})
+    Attribute(
+        LibMLIR.mlirArrayAttrGet(context, length(attributes), attributes),
+    )
+end
 function DenseArrayAttribute(context, values::AbstractVector{Int})
     Attribute(
         LibMLIR.mlirDenseI64ArrayGet(context, length(values), collect(values))
@@ -415,11 +420,13 @@ struct NamedAttribute
     named_attribute::MlirNamedAttribute
 end
 
-NamedAttribute(context, name, attribute) =
+function NamedAttribute(context, name, attribute)
+    @assert !LibMLIR.mlirAttributeIsNull(attribute.attribute)
     NamedAttribute(LibMLIR.mlirNamedAttributeGet(
         LibMLIR.mlirIdentifierGet(context, name),
         attribute
     ))
+end
 
 Base.convert(::Type{MlirAttribute}, named_attribute::NamedAttribute) =
     named_attribute.named_attribute
@@ -604,12 +611,12 @@ get_results(operation) = [
     get_result(operation, i)
     for i in 1:num_results(operation)
 ]
-function get_result(operation::Operation, i)
+function get_result(operation::Operation, i=1)
     i ∉ 1:num_results(operation) && throw(BoundsError(operation, i))
     Value(LibMLIR.mlirOperationGetResult(operation, i - 1))
 end
 num_operands(operation) = LibMLIR.mlirOperationGetNumOperands(operation)
-function get_operand(operation, i)
+function get_operand(operation, i=1)
     i ∉ 1:num_operands(operation) && throw(BoundsError(operation, i))
     Value(LibMLIR.mlirOperationGetOperand(operation, i - 1))
 end

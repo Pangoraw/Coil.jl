@@ -244,9 +244,15 @@ function lower_call!(cg, config::OpConfig, op)
 end
 function lower_call!(cg, ::OpConfig{typeof(convert)}, op)
     # TODO: cast float types
+    if !haskey(cg.tape.c.operands, op.args[2])
+        return
+    end
     cg.tape.c.operands[V(op)] = get_arg_operand!(cg, op.args[2]; cst_op=arith.constant)
 end
 function lower_call!(cg, ::OpConfig{typeof(typeassert)}, op)
+    if !haskey(cg.tape.c.operands, op.args[1])
+        return
+    end
     cg.tape.c.operands[V(op)] = get_arg_operand!(cg, op.args[1]; cst_op=arith.constant)
 end
 function lower_call!(cg, ::OpConfig{typeof(Core.kwcall)}, op::Umlaut.Call{T}) where {T}
@@ -293,6 +299,11 @@ function lower_call!(cg, config::OpConfig{typeof(getindex)}, op)
         return generic_lower_call(cg, config, op)
     end
 
+    if !haskey(cg.tape.c.operands, first(op.args)) ||
+       !haskey(cg.tape.c.operands, last(op.args))
+        return
+    end
+
     x = get_arg_operand!(cg, first(op.args); cst_op=mhlo.constant)
     i = get_arg_operand!(cg, last(op.args); cst_op=arith.constant)
 
@@ -312,6 +323,10 @@ function lower_call!(cg, ::OpConfig{typeof(map)}, op)
     # fred = value(op.args[2])
     @assert length(op.args) == 2
 
+    if !haskey(cg.tape.c.operands, op.args[2])
+        return
+    end
+
     operand = get_arg_operand!(cg, op.args[2]; cst_op=arith.constant)
     type = get_type(operand)
 
@@ -330,11 +345,10 @@ function lower_call!(cg, ::OpConfig{typeof(map)}, op)
     out0 = push!(block, tensor.empty(mlir_ctx, type; loc=@loc(mlir_ctx)))
     push!(block, linalg.map(mlir_ctx, inner_block, operand, get_result(out0, 1); loc=Location(mlir_ctx, op.line)))
 end
-function lower_call!(cg, ::OpConfig{typeof(zero)}, op)
-    (; mlir_ctx, block) = cg
-    T = value(only(op.args))
-    push!(block, mhlo.constant(mlir_ctx, op.val; loc=Location(mlir_ctx, op.line)))
-end
+# function lower_call!(cg, ::OpConfig{typeof(zero)}, op)
+#     (; mlir_ctx, block) = cg
+#     push!(block, mhlo.constant(mlir_ctx, op.val; loc=Location(mlir_ctx, op.line)))
+# end
 function lower_call!(cg, ::OpConfig{typeof(reduce)}, op)
     op.fn = reduce
     pushfirst!(op.args, identity)
@@ -407,6 +421,101 @@ function lower_call!(cg, ::OpConfig{typeof(mapreduce)}, op)
         push!(block, mhlo.reshape(mlir_ctx, get_result(reduce0, 1), shape_with_dims; loc=@loc(mlir_ctx)))
     end
 end
+
+function lower_call!(cg, ::OpConfig{typeof(NNlib.meanpool)}, op)
+    (; mlir_ctx, block) = cg
+    reduced = get_result(lower_reduce_window!(cg, mhlo.add, op))
+    output_type = get_type(reduced)
+
+    inW, inH, _, _ = size(get_type(get_arg_operand!(cg, op.args[1]; cst_op=nothing)))
+    outW, outH, _, _ = output_size = size(output_type)
+
+    win_W = inW ÷ outW
+    win_H = inH ÷ outH
+    factor = win_W * win_H
+
+    cst = get_result(push!(block, arith.constant(mlir_ctx, fill(julia_type(eltype(output_type))(factor)); loc=Location(mlir_ctx, op.line))))
+    cst = get_result(push!(block, mhlo.broadcast_in_dim(mlir_ctx, cst, output_size; loc=Location(mlir_ctx, op.line))))
+    push!(block, mhlo.divide(mlir_ctx, [reduced, cst]; loc=Location(mlir_ctx, op.line)))
+end
+function lower_call!(cg, ::OpConfig{typeof(NNlib.maxpool)}, op)
+    lower_reduce_window!(cg, mhlo.maximum, op)
+end
+
+function lower_reduce_window!(cg, reduce_op, op)
+    (; mlir_ctx, block) = cg
+
+    operand, dims = op.args
+    operand = get_arg_operand!(cg, operand; cst_op=arith.constant)
+    dims = value(dims)
+
+    @assert dims isa NNlib.PoolDims "unsupported NNlib.maxpool call"
+
+    # kernel_size::NTuple{K, Int}
+    # channels_in::Int
+
+    # stride::NTuple{S, Int}
+    # padding::NTuple{P, Int}
+    # dilation::NTuple{D, Int}
+
+    input_type = get_type(operand)
+    W, H, C, B = size(input_type)
+    T = eltype(input_type)
+
+    window_dimensions = [dims.kernel_size..., 1, 1]
+    window_strides = [dims.stride..., 1, 1]
+    base_dilations = [1, 1, 1, 1]
+    window_dilations = [dims.dilation..., 1, 1]
+    padding = [dims.padding..., 0, 0][begin:4]
+    padding = repeat(padding; inner=(1, 2))
+
+    kw, kh = dims.kernel_size
+    pw, ph, _, _ = dims.padding
+    dw, dh = dims.dilation
+    sw, sh = dims.stride
+    h_out = (H + 2 * ph - dh * (kh - 1) - 1) ÷ sh + 1
+    w_out = (W + 2 * pw - dw * (kw - 1) - 1) ÷ sw + 1
+
+    output_size = (w_out, h_out, C, B)
+    output_type = MType(mlir_ctx, T, output_size)
+
+    inner_block = let
+        unranked_tensor_type = MType(mlir_ctx, T, ())
+        inner_block = MLIR.Block(
+            [unranked_tensor_type, unranked_tensor_type],
+            [Location(mlir_ctx, op.line), Location(mlir_ctx, op.line)],
+        )
+        val = MLIR.get_argument(inner_block, 1)
+        init = MLIR.get_argument(inner_block, 2)
+        maxop = push!(inner_block, reduce_op(mlir_ctx, [val, init]; loc=@loc(mlir_ctx)))
+        out = get_result(maxop, 1)
+        push!(inner_block, mhlo.return_(mlir_ctx, out; loc=@loc(mlir_ctx)))
+        inner_block
+    end
+    region = MLIR.Region()
+    push!(region, inner_block)
+
+    initop = push!(block, arith.constant(
+        mlir_ctx,
+        zeros(MLIR.julia_type(T),);
+        loc=@loc(mlir_ctx)
+    ))
+
+    init_values = get_result(initop, 1)
+    operands = [operand, init_values]
+
+    push!(block, mhlo.reduce_window(
+        mlir_ctx,
+        operands, region,
+        window_dimensions,
+        window_strides,
+        base_dilations,
+        window_dilations,
+        padding,
+        output_type;
+        loc=Location(mlir_ctx, op.line)
+    ))
+end
 function lower_call!(cg, ::OpConfig{typeof(NNlib.conv)}, op)
     (; mlir_ctx, block, tape) = cg
     ctx = tape.c
@@ -432,18 +541,45 @@ function lower_call!(cg, ::OpConfig{typeof(NNlib.conv)}, op)
     output_size = (w_out, h_out, c_out, B)
     output_type = MType(mlir_ctx, eltype(input_type), output_size)
 
-    conv0 = push!(block, mhlo.convolution(mlir_ctx, output_type, operands))
+    padding = Int64[
+        pw pw
+        ph ph
+    ]
+    dilation = Int64[dw, dh]
+    strides = Int64[sw, sh]
+
+    conv0 = push!(block,
+        mhlo.convolution(
+            mlir_ctx,
+            output_type,
+            operands,
+            padding,
+            dilation,
+            strides;
+            loc=Location(mlir_ctx, op.line),
+        ),
+    )
     ctx.operands[V(op)] = get_result(conv0, 1)
 end
 function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.materialize)}, op)
     (; tape) = cg
     ctx = tape.c
+    if !haskey(ctx.operands, first(op.args))
+        @debug "skipping materialization of broadcast"
+        return
+    end
     ctx.operands[V(op)] = get_arg_operand!(cg, first(op.args); cst_op=mhlo.constant)
     nothing
 end
 function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
     (; mlir_ctx, block, tape) = cg
     ctx = tape.c
+
+    val_arg2 = value(op.args[2])
+    if !(val_arg2 isa AbstractArray) && !haskey(ctx.operands, op.args[2])
+        @debug "broadcast of non-array" T=typeof(value(op.args[2]))
+        return
+    end
 
     if length(op.args) == 2
         func_arg = first(op.args)
@@ -567,6 +703,10 @@ function lower_call!(cg, ::OpConfig{typeof(fma)}, op)
     (; block, tape, mlir_ctx) = cg
     ctx = tape.c
 
+    if all(arg -> !is_tensor(tape, arg), op.args)
+        return
+    end
+
     (a, b, c) = get_arg_operands!(cg, op)
     mul0 = push!(block, gen_arith!(cg, *, [a, b]; loc=Location(mlir_ctx, op.line)))
     add0 = push!(block, gen_arith!(cg, +, [MLIR.get_result(mul0, 1), c]; loc=Location(mlir_ctx, op.line)))
@@ -601,14 +741,15 @@ end
 
 function lower_arith!(cg, op)
     (; mlir_ctx, block, tape) = cg
-    ctx = tape.c
+
+    if all(arg -> !is_tensor(tape, arg), op.args)
+        return
+    end
+
     f = value(op.fn)
 
     operands = get_arg_operands!(cg, op; cst_op=arith.constant)
-    mop = push!(block, gen_arith!(cg, f, operands; loc=Location(mlir_ctx, op.line)))
-
-    ctx.operands[V(op)] =
-        MLIR.get_result(mop, 1)
+    push!(block, gen_arith!(cg, f, operands; loc=Location(mlir_ctx, op.line)))
 end
 
 function _convertto!(mlir_ctx, block, a, Ta, T)
@@ -633,6 +774,8 @@ function gen_arith!(cg, f, operands; loc=Location(cg.mlir_ctx))
         return fop
     end
     @assert length(operands) == 2
+
+    error("generating arith")
 
     is_integer = all(operand -> MLIR.is_integer(eltype(get_type(operand))), operands)
     if is_integer && f == /
@@ -675,12 +818,11 @@ end
 function lower_call!(cg, ::OpConfig{typeof(*)}, op)
     (; mlir_ctx, block, tape) = cg
 
-    operands = get_arg_operands!(cg, op)
-
-    if !all(arg -> is_tensor(tape, arg), op.args)
-        lower_arith!(cg, op)
+    if all(arg -> !is_tensor(tape, arg), op.args)
         return
     end
+
+    operands = get_arg_operands!(cg, op)
 
     state = OperationState("mhlo.dot", Location(mlir_ctx, op.line))
     MLIR.add_operands!(state, operands)
@@ -749,9 +891,18 @@ function lower_call!(cg, ::OpConfig{typeof(reshape)}, op)
     end
 end
 
+countops(block) = begin
+    s = 0
+    for _ in MLIR.OperationIterator(block)
+        s+=1
+    end
+    s
+end
+
 function lower_call!(cg, op)
     f = op.fn isa Variable ?
         cg.tape[op.fn].val : op.fn
+    @debug "lowering for" f prim=Umlaut.isprimitive(cg.tape.c, f, op.args...) ops = countops(cg.block)
     out = lower_call!(cg, OpConfig{typeof(f)}(), op)
     if out isa MLIR.Operation
         if MLIR.num_results(out) == 1
@@ -785,7 +936,16 @@ function compile_to_module(tape, args...; verbose)
     cg_context = CodegenContext(mlir_ctx, block, tape, verbose)
     lower_tape!(cg_context)
 
-    result_types = [MLIR.get_type(ctx.operands[bound(tape, tape.result)])]
+    if !haskey(ctx.operands, bound(tape, tape.result))
+        last_computed = maximum(v -> v.id, keys(ctx.operands))
+        last_variable = Umlaut.Variable(last_computed)
+        op = tape[last_variable]
+        throw("failed to compute a graph for the function @ $(op.line)")
+    end
+
+    result_operand = ctx.operands[bound(tape, tape.result)]
+
+    result_types = [MLIR.get_type(result_operand)]
     input_types = [
         MLIR.get_type(ctx.operands[bound(tape, arg)])
         for arg in ctx.block_args
@@ -802,13 +962,15 @@ function compile_to_module(tape, args...; verbose)
     MLIR.add_owned_regions!(mlir_func_state, [region])
 
     push!(block, func.return_(mlir_ctx,
-        [ctx.operands[bound(tape, tape.result)]]
+        [result_operand]
     ))
 
     funcop = Operation(mlir_func_state)
     push!(mlir_module_body, funcop)
 
     verbose && show(IOContext(stdout, :debug => true), funcop)
+
+    MLIR.verifyall(mlir_module)
 
     return mlir_module
 end
@@ -821,8 +983,10 @@ function compile_tape(tape, args...; verbose=haskey(ENV, "COIL_VERBOSE"))
 
     # Apply row-major -> col-major passes
 
+    @debug "running passes"
     MLIR.run(Passes.TransposeArgsToRowMajorPass(), mlir_module)
     MLIR.run(Passes.TransposeReturnTypePass(), mlir_module)
+    @debug "done running passes"
 
     ###
 
@@ -850,7 +1014,7 @@ function lower_tape!(cg)
     for op in tape
         if (op isa Umlaut.Input ||
             op isa Umlaut.Call ||
-            op isa Umlaut.Const) && is_trackable_tensor(op.val)
+            op isa Umlaut.Constant) && is_trackable_tensor(op.val)
 
             ctx.shapes[V(op)] = SymTensor(op.val)
         end
@@ -1092,7 +1256,7 @@ function simplify_tape!(tape)
     res = tape.result
     resop = tape[bound(tape, res)]
 
-    if resop isa Umlaut.Input || resop isa Umlaut.Const
+    if resop isa Umlaut.Input || resop isa Umlaut.Constant
         filter!(!=(resop), tape.ops)
         return tape
     end
@@ -1101,13 +1265,14 @@ function simplify_tape!(tape)
     found_res = false
 
     for op in Iterators.reverse(tape.ops)
-        if op isa Umlaut.Input
+        if op isa Umlaut.Input || op isa Umlaut.Constant
             continue
         end
 
         if op == resop
             found_res = true
             union!(universe, filter(a -> a isa V, op.args))
+            continue
         end
 
         v = V(op)
