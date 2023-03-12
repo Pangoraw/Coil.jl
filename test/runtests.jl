@@ -27,7 +27,7 @@ end
     @testset "BufferView: $N dims" for N in 0:3
         a = randn(Float32, (2 + i for i in 1:N)...)
         N == 0 && (a = fill(a))
-        v = BufferView(Coil.Tracing.get_session(), a)
+        v = ColMajorBufferView(Device("local-task"), a)
 
         @test a == v
     end

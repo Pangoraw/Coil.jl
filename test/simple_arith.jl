@@ -9,7 +9,8 @@ using Coil
 
         a, b = rand(Int32), rand(Int32)
 
-        # IREE VM outputs Float64 as Float32
+        # IREE VM demotes Float64 to Float32
+        # TODO: prevent demoting?
         out_type = typeof(f(a, b))
         cmp = out_type == Float64 ? Base.:≈ : Base.:(==)
         cast_type = out_type == Float64 ? Float32 : out_type

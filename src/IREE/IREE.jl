@@ -19,7 +19,8 @@ export
     Session,
     Device,
     Call,
-    BufferView
+    BufferView,
+    ColMajorBufferView
 
 export
     append_bytecode!
@@ -240,21 +241,26 @@ Base.unsafe_convert(::Type{Ptr{iree_runtime_instance_t}}, instance::Instance) = 
 mutable struct Device
     device::Ptr{iree_hal_device_t}
 
-    Device(device) = finalizer(Runtime.iree_hal_device_release, new(device))
+    Device(device::Ptr{iree_hal_device_t}) =
+        finalizer(Runtime.iree_hal_device_release, new(device))
 end
 
-function Device(instance::Instance, driver_name="local-task")
+const DEFAULT_DRIVER = "local-task"
+
+function Device(instance::Instance, driver_name=DEFAULT_DRIVER)
     device = Device(Ptr{iree_hal_device_t}())
     @iree_check begin
         GC.@preserve device Runtime.iree_runtime_instance_try_create_default_device(
             instance,
-            driver_name,
+            string(driver_name),
             Base.unsafe_convert(Ptr{Ptr{iree_runtime_instance_t}}, Base.pointer_from_objref(device)),
         )
     end
-    @assert device.device != C_NULL "failed to create Device"
+    @assert device.device != C_NULL "failed to create Device with driver $driver_name"
     device
 end
+Device(driver=DEFAULT_DRIVER) = Device(Instance(), driver)
+
 
 Base.unsafe_convert(::Type{Ptr{iree_hal_device_t}}, device::Device) = device.device
 
@@ -284,16 +290,17 @@ Base.unsafe_convert(::Type{Ptr{iree_runtime_session_options_t}}, options::Sessio
 mutable struct Session
     session::Ptr{iree_runtime_session_t}
     bytecodes::Vector{Vector{UInt8}}
+    device::Device
 
-    Session(session) = begin
-        finalizer(new(session, [])) do session
+    Session(session, device) = begin
+        finalizer(new(session, [], device)) do session
             Runtime.iree_runtime_session_release(session.session)
         end
     end
 end
 
 function Session(instance, options, device)
-    session = Session(Ptr{iree_runtime_session_t}())
+    session = Session(Ptr{iree_runtime_session_t}(), device)
     allocator = Runtime.iree_runtime_instance_host_allocator(instance)
     @iree_check begin
         GC.@preserve session Runtime.iree_runtime_session_create_with_device(
@@ -500,8 +507,8 @@ function (call::Call)(args...)
             set_ref!(
                 call.call.inputs, i,
                 call.args_transposed ?
-                ColMajorBufferView(call.session, arg) :
-                BufferView(call.session, arg),
+                ColMajorBufferView(call.session.device, arg) :
+                BufferView(call.session.device, arg),
             )
         elseif arg_cconv != IREE_RUNTIME_CALLING_CONVENTION_REF
             in_value = Ref(to_vm_value(arg))
@@ -538,7 +545,7 @@ function (call::Call)(args...)
             N = Runtime.iree_hal_buffer_view_shape_rank(buffer_view)
             iree_type = Runtime.iree_hal_buffer_view_element_type(buffer_view)
             T = julia_type(iree_type)
-            bf = BufferView{T,N}(buffer_view, call.session)
+            bf = BufferView{T,N}(buffer_view, call.session.device)
             return call.return_transposed && N > 1 ? ColMajorBufferView{T,N}(bf) : bf
         end
 
@@ -569,20 +576,20 @@ end
 ### IREE Buffer View
 
 """
-    BufferView(session::Session, a::AbstractArray)
+    BufferView(device::Device, a::AbstractArray)
     BufferView{T,N} <: AbstractArray{T,N}
 
-A BufferView copies the data to an iree owned data buffer which can then be used
+A `BufferView` copies the data to an iree owned data buffer which can then be used
 as a parameter to runtime calls when the calling convention requires a reference
 to a buffer view.
 """
 mutable struct BufferView{T,N} <: AbstractArray{T,N}
     view::Ptr{iree_hal_buffer_view_t}
-    session::Session
+    device::Device
 
-    BufferView{T,N}(view, session) where {T,N} = begin
+    BufferView{T,N}(view::Ptr{iree_hal_buffer_view_t}, device::Device) where {T,N} = begin
         @assert view != C_NULL
-        finalizer(new{T,N}(view, session)) do view
+        finalizer(new{T,N}(view, device)) do view
             Runtime.iree_hal_buffer_view_release(view.view)
         end
     end
@@ -677,16 +684,25 @@ function row_majorize(a::AbstractArray{T,N}) where {T,N}
     return out
 end
 
-function ColMajorBufferView(session, a::AbstractArray{T,N}) where {T,N}
+ColMajorBufferView(::Device, view::ColMajorBufferView) = view
+ColMajorBufferView(::Device, view::BufferView{T,N}) where {T,N} = ColMajorBufferView{T,N}(view)
+function ColMajorBufferView(device, a::AbstractArray{T,N}) where {T,N}
+    ColMajorBufferView{T,N}(
+        BufferView{T,N}(make_iree_hal_buffer_view_t(device, reverse(size(a)), a), device),
+    )
+end
+
+# light-weight wrapper around iree_hal_buffer_view_allocate_buffer 
+function make_iree_hal_buffer_view_t(device, sz, a::AbstractArray{T,N}) where {T,N}
     out_buffer = Ref(Ptr{iree_hal_buffer_view_t}())
 
     @iree_check GC.@preserve a out_buffer Runtime.iree_hal_buffer_view_allocate_buffer(
-        Runtime.iree_runtime_session_device_allocator(session),
-        N, collect(Iterators.reverse(size(a))),
+        Runtime.iree_hal_device_allocator(device),
+        N, collect(sz),
         iree_type(T), Runtime.IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
         Runtime.iree_hal_buffer_params_t(
-            Runtime.IREE_HAL_BUFFER_USAGE_DEFAULT | Runtime.IREE_HAL_BUFFER_USAGE_MAPPING,
-            Runtime.IREE_HAL_MEMORY_ACCESS_READ,
+            Runtime.IREE_HAL_BUFFER_USAGE_DEFAULT,
+            0,
             Runtime.IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
             zero(Runtime.iree_hal_queue_affinity_t),
             zero(Runtime.iree_device_size_t),
@@ -695,36 +711,17 @@ function ColMajorBufferView(session, a::AbstractArray{T,N}) where {T,N}
         Base.unsafe_convert(Ptr{Ptr{Runtime.iree_hal_buffer_view_t}}, Base.pointer_from_objref(out_buffer),)
     )
 
-    ColMajorBufferView{T,N}(
-        BufferView{T,N}(out_buffer[], session)
-    )
+    out_buffer[]
 end
 
-BufferView(_, view::BufferView) = view
-function BufferView(session, a::AbstractArray{T,N}) where {T,N}
+BufferView(_::Device, view::BufferView) = view
+function BufferView(device::Device, a::AbstractArray{T,N}) where {T,N}
     # Unfortunately, IREE does not support IREE_HAL_ENCODING_TYPE_DENSE_COLUMN_MAJOR
     # we therefore have to load the buffers in such a way that the data is in row major
     row_major_a = N > 1 ?
                   row_majorize(a) : a
 
-    out_buffer = Ref(Ptr{iree_hal_buffer_view_t}())
-
-    @iree_check GC.@preserve a out_buffer Runtime.iree_hal_buffer_view_allocate_buffer(
-        Runtime.iree_runtime_session_device_allocator(session),
-        N, collect(size(row_major_a)),
-        iree_type(T), Runtime.IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
-        Runtime.iree_hal_buffer_params_t(
-            Runtime.IREE_HAL_BUFFER_USAGE_DEFAULT | Runtime.IREE_HAL_BUFFER_USAGE_MAPPING,
-            Runtime.IREE_HAL_MEMORY_ACCESS_READ,
-            Runtime.IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
-            zero(Runtime.iree_hal_queue_affinity_t),
-            zero(Runtime.iree_device_size_t),
-        ),
-        Runtime.iree_const_byte_span_t(pointer(row_major_a), sizeof(row_major_a)),
-        Base.unsafe_convert(Ptr{Ptr{Runtime.iree_hal_buffer_view_t}}, Base.pointer_from_objref(out_buffer),)
-    )
-
-    BufferView{T,N}(out_buffer[], session)
+    BufferView{T,N}(make_iree_hal_buffer_view_t(device, size(row_major_a), a), device)
 end
 
 Base.size(cf::ColMajorBufferView) = reverse(size(cf.view))
@@ -734,6 +731,8 @@ function Base.size(view::BufferView)
     dims = unsafe_wrap(Array, dims_ptr, ndims; own=false)
     Tuple(dims)
 end
+
+iree_infinite_timeout() = Runtime.iree_timeout_t(Runtime.IREE_TIMEOUT_ABSOLUTE, Runtime.IREE_TIME_INFINITE_FUTURE)
 
 iree_hal_buffer_view_append_to_builder(view, max_element_count, builder) =
     @ccall libiree_runtime.iree_hal_buffer_view_append_to_builder(
@@ -756,6 +755,15 @@ iree_hal_buffer_map_read(buffer, offset, target_buffer, data_length) =
         target_buffer::Ptr{Cvoid}, data_length::Runtime.iree_device_size_t)::iree_status_t
 iree_hal_buffer_allocated_buffer(buffer) =
     @ccall libiree_runtime.iree_hal_buffer_allocated_buffer(buffer::Ptr{iree_hal_buffer_t})::Ptr{iree_hal_buffer_t}
+const iree_hal_transfer_buffer_flags_t = Cuint
+iree_hal_device_transfer_d2h(device, source, source_offset, target, data_length, flags, timeout) =
+    @ccall libiree_runtime.iree_hal_device_transfer_d2h(
+        device::Ptr{iree_hal_device_t},
+        source::Ptr{iree_hal_buffer_t}, source_offset::Runtime.iree_device_size_t,
+        target::Ptr{Cvoid}, data_length::Runtime.iree_device_size_t,
+        flags::iree_hal_transfer_buffer_flags_t,
+        timeout::Runtime.iree_timeout_t,
+    )::iree_status_t
 
 "Util to bypass the default Base.show implemented for arrays"
 function dump_view(buffer_view::Ptr{iree_hal_buffer_view_t})
@@ -783,11 +791,9 @@ Base.getindex(view::ColMajorBufferView, I...) = Base.getindex(view.view, Iterato
 Base.getindex(view::BufferView, I::CartesianIndex) = Base.getindex(view, Tuple(I)...)
 function Base.getindex(view::BufferView{T,N}, I...) where {T,N}
     Base.checkbounds(view, I...)
+    # TODO: support I[i] isa UnitRange
 
-    buffer = Base.unsafe_convert(
-        Ptr{T},
-        iree_hal_buffer_view_buffer(view),
-    )
+    buffer = iree_hal_buffer_view_buffer(view)
     @assert buffer != C_NULL
 
     n_dims = ndims(view)
@@ -804,11 +810,14 @@ function Base.getindex(view::BufferView{T,N}, I...) where {T,N}
             Base.pointer_from_objref(offset)),
     )
 
+    # TODO: look at CUDA.jl code to read the buffer only once (similar to `convert(Array{T,N}, view)`).
+    #       to improve the perf of `show(io, view)`;
     val = [zero(T)]
-    @iree_check GC.@preserve val iree_hal_buffer_map_read(
+    @iree_check GC.@preserve val iree_hal_device_transfer_d2h(
+        view.device,
         buffer, offset[],
-        pointer(val),
-        sizeof(T),
+        pointer(val), sizeof(T),
+        0, iree_infinite_timeout(),
     )
 
     only(val)
@@ -816,6 +825,22 @@ end
 
 Base.unsafe_convert(PT::Type{Ptr{T}}, view::ColMajorBufferView) where {T<:Union{Cvoid,iree_hal_buffer_view_t}} = Base.unsafe_convert(PT, view.view)
 Base.unsafe_convert(::Type{Ptr{T}}, view::BufferView) where {T<:Union{Cvoid,iree_hal_buffer_view_t}} = Ptr{T}(view.view)
+
+function Base.convert(::Type{Array{T,N}}, view::BufferView{T,N}) where {T,N}
+    out = Array{T,N}(undef, size(view))
+
+    buffer = iree_hal_buffer_view_buffer(view)
+    @assert buffer != C_NULL
+
+    @iree_check GC.@preserve out iree_hal_device_transfer_d2h(
+        view.device,
+        buffer, 0,
+        out, sizeof(out),
+        0, iree_infinite_timeout(),
+    )
+
+    out
+end
 
 function vm_value_with_type(f, type)
     value = Ref(iree_vm_value_t(Tuple(zero(UInt8) for _ in 1:16)))

@@ -462,6 +462,7 @@ function convolution(
         NamedAttribute(context, "feature_group_count", Attribute(context, 1)),
         NamedAttribute(context, "padding", Attribute(context, padding)),
         NamedAttribute(context, "rhs_dilation", Attribute(context, rhs_dilation)),
+        NamedAttribute(context, "lhs_dilation", Attribute(context, ones(Int64, length(rhs_dilation)))),
         NamedAttribute(context, "window_strides", Attribute(context, window_strides)),
         # NamedAttribute(context, "feature_group_count", Attribute(context, 1)),
         # NamedAttribute(context, "padding", Attribute(context, fill(2, 2, 2))),

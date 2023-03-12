@@ -8,7 +8,8 @@ Coil exports only one function: `Coil.compile(f)` which returns a function which
  - Fold model hyperparameters by unrolling loops, control flow, etc...
  - Evaluate on different hardware accelerators using the [IREE](https://github.com/iree-org/iree) runtime.
 
-Note that this currently does meet any of those goals and is first and foremost a way for me to learn about MLIR and IREE.
+> **Note**
+> Note that Coil currently does not meet any of those goals and is also a way for me to learn about MLIR and IREE.
 
 ## Example usage
 
@@ -64,7 +65,7 @@ module {
 
 ## Tracing
 
-To trace functions, Coil leverages [Umlaut.jl]() which converts functions to linearized tapes. It then replaces lowerable calls from this tape to MLIR operations. Since not all Julia
+To trace functions, Coil leverages [Umlaut.jl](https://github.com/dfdx/Umlaut.jl) which converts functions to linearized tapes. It then replaces lowerable calls from this tape to MLIR operations. Since not all Julia
 calls can be replaced to MLIR operation (struct code, io, etc...), the transformation produce a new
 tape where only tensor and arithmetic operations are lifted to MLIR dialects.
 
@@ -140,6 +141,8 @@ cmake -GNinja -B ../iree-build/ -S . \
     -DIREE_ENABLE_ASSERTIONS=ON \
     -DCMAKE_C_COMPILER=clang \
     -DCMAKE_CXX_COMPILER=clang++ \
+    -DIREE_HAL_DRIVER_VULKAN=on \
+    -DIREE_TARGET_BACKEND_VULKAN_SPIRV=on \
     -DIREE_ENABLE_LLD=ON
 ```
 
@@ -149,3 +152,8 @@ This will create the two required libraries in the `iree-build/` folder:
  - The runtime library (`lib_runtime_shared_shared`) containing the bytecode interpreter and drivers to run IREE programs.
 
 Later, these libraries will be provided as _jll packages built using [Binary Builder](https://binarybuilder.org).
+
+## References
+
+ - [ONNX.jl](https://github.com/FluxML/ONNX.jl) - Coil take a very similar approach to ONNX.jl but lowers down to MLIR modules instead of ONNX operations. 
+ - [XLA.jl](https://github.com/FluxML/XLA.jl) - XLA lowers from Julia IR down to XLA HLO and can execute to TPU. Interestingly, the tensor shape inference is embedded in Julia's type system whereas Coil uses the runtime values collected during tracing.

@@ -122,6 +122,7 @@ const primitives = Set([
     NamedTuple,
     fieldtype,
     Umlaut.__new__,
+    size,
 ])
 
 function Umlaut.isprimitive(c::Context, f, args...)
@@ -160,6 +161,7 @@ struct CodegenContext
     block::Block
     tape::Tape{Context}
     verbose::Bool
+    allow_scalar_args::Bool
 end
 
 function to_loc(mlir_ctx, line)
@@ -299,8 +301,7 @@ function lower_call!(cg, config::OpConfig{typeof(getindex)}, op)
         return generic_lower_call(cg, config, op)
     end
 
-    if !haskey(cg.tape.c.operands, first(op.args)) ||
-       !haskey(cg.tape.c.operands, last(op.args))
+    if !(first(op.args).op isa Umlaut.Input || haskey(cg.tape.c.operands, first(op.args)))
         return
     end
 
@@ -336,7 +337,7 @@ function lower_call!(cg, ::OpConfig{typeof(map)}, op)
     _, unary_tape = _trace(fmap, val; ctx=unary_ctx)
 
     inner_block = Block(MType[], Location[])
-    unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose)
+    unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose, true)
 
     lower_tape!(unary_cg)
 
@@ -398,7 +399,7 @@ function lower_call!(cg, ::OpConfig{typeof(mapreduce)}, op)
     _, unary_tape = _trace(fmapreduce, valx, vali)
 
     inner_block = Block(MType[], Location[])
-    unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose)
+    unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose, true)
 
     lower_tape!(unary_cg)
     unary_ctx = unary_tape.c
@@ -556,7 +557,7 @@ function lower_call!(cg, ::OpConfig{typeof(NNlib.conv)}, op)
             padding,
             dilation,
             strides;
-            loc=Location(mlir_ctx, op.line),
+            loc=Location(mlir_ctx, op.line)
         ),
     )
     ctx.operands[V(op)] = get_result(conv0, 1)
@@ -577,7 +578,7 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
 
     val_arg2 = value(op.args[2])
     if !(val_arg2 isa AbstractArray) && !haskey(ctx.operands, op.args[2])
-        @debug "broadcast of non-array" T=typeof(value(op.args[2]))
+        @debug "broadcast of non-array" T = typeof(value(op.args[2]))
         return
     end
 
@@ -619,7 +620,7 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
             unary_ctx = Context(f)
             _, unary_tape = _trace(f, val; ctx=unary_ctx)
 
-            unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose)
+            unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose, true)
             lower_tape!(unary_cg)
 
             ret_operand = unary_ctx.operands[unary_tape.result]
@@ -703,7 +704,7 @@ function lower_call!(cg, ::OpConfig{typeof(fma)}, op)
     (; block, tape, mlir_ctx) = cg
     ctx = tape.c
 
-    if all(arg -> !is_tensor(tape, arg), op.args)
+    if !cg.allow_scalar_args && all(arg -> !is_tensor(tape, arg), op.args)
         return
     end
 
@@ -742,7 +743,8 @@ end
 function lower_arith!(cg, op)
     (; mlir_ctx, block, tape) = cg
 
-    if all(arg -> !is_tensor(tape, arg), op.args)
+    if false && !cg.allow_scalar_args &&
+            all(arg -> !is_tensor(tape, arg), op.args)
         return
     end
 
@@ -774,8 +776,6 @@ function gen_arith!(cg, f, operands; loc=Location(cg.mlir_ctx))
         return fop
     end
     @assert length(operands) == 2
-
-    error("generating arith")
 
     is_integer = all(operand -> MLIR.is_integer(eltype(get_type(operand))), operands)
     if is_integer && f == /
@@ -814,12 +814,15 @@ for f in (+, -, /)
         lower_arith!(cg, op)
     end
 end
+function lower_call!(cg, ::OpConfig{typeof(Base.add_sum)}, op)
+    lower_arith!(cg, Umlaut.Call(op.id, op.val, +, op.args; line=op.line)) # TODO: check if this is correct?
+end
 
 function lower_call!(cg, ::OpConfig{typeof(*)}, op)
     (; mlir_ctx, block, tape) = cg
 
     if all(arg -> !is_tensor(tape, arg), op.args)
-        return
+        return lower_arith!(cg, op)
     end
 
     operands = get_arg_operands!(cg, op)
@@ -894,7 +897,7 @@ end
 countops(block) = begin
     s = 0
     for _ in MLIR.OperationIterator(block)
-        s+=1
+        s += 1
     end
     s
 end
@@ -902,7 +905,7 @@ end
 function lower_call!(cg, op)
     f = op.fn isa Variable ?
         cg.tape[op.fn].val : op.fn
-    @debug "lowering for" f prim=Umlaut.isprimitive(cg.tape.c, f, op.args...) ops = countops(cg.block)
+    @debug "lowering for" f prim = Umlaut.isprimitive(cg.tape.c, f, op.args...) ops = countops(cg.block)
     out = lower_call!(cg, OpConfig{typeof(f)}(), op)
     if out isa MLIR.Operation
         if MLIR.num_results(out) == 1
@@ -933,10 +936,13 @@ function compile_to_module(tape, args...; verbose)
 
     block = Block(MType[], Location[])
 
-    cg_context = CodegenContext(mlir_ctx, block, tape, verbose)
+    allow_scalar_args = any(arg -> arg.op.typ <: Real, inputs(tape))
+
+    cg_context = CodegenContext(mlir_ctx, block, tape, verbose, allow_scalar_args)
     lower_tape!(cg_context)
 
     if !haskey(ctx.operands, bound(tape, tape.result))
+        isempty(ctx.operands) && throw("failed to compile any operation $allow_scalar_args")
         last_computed = maximum(v -> v.id, keys(ctx.operands))
         last_variable = Umlaut.Variable(last_computed)
         op = tape[last_variable]
@@ -975,7 +981,7 @@ function compile_to_module(tape, args...; verbose)
     return mlir_module
 end
 
-function compile_tape(tape, args...; verbose=haskey(ENV, "COIL_VERBOSE"))
+function compile_tape(tape, args...; verbose=haskey(ENV, "COIL_VERBOSE"), device, hal_target)
     ctx = tape.c
     func_name = ctx.f isa Function ? nameof(ctx.f) : nameof(typeof(ctx.f))
 
@@ -990,7 +996,7 @@ function compile_tape(tape, args...; verbose=haskey(ENV, "COIL_VERBOSE"))
 
     ###
 
-    graph_call = get_call(mlir_module, string("module.", func_name))
+    graph_call = get_call(mlir_module, string("module.", func_name), device, hal_target)
 
     result_op = tape[tape.result]
     graph_call_op = Umlaut.mkcall(graph_call, ctx.block_args...; val=result_op.val)
@@ -1003,8 +1009,32 @@ function compile_tape(tape, args...; verbose=haskey(ENV, "COIL_VERBOSE"))
 
     verbose && display(tape)
 
-    compiled_func = Umlaut.compile(tape)
-    (args...) -> compiled_func(ctx.f, args...)
+    f_to_device = iree(device, ctx.f)
+
+    func_expr = Umlaut.to_expr(tape)
+    abstractize_array_args!(func_expr, typeof(f_to_device))
+
+    compiled_func = Base.eval(@__MODULE__, func_expr)
+    (args...) -> compiled_func(f_to_device, (arg isa AbstractArray ? IREE.ColMajorBufferView(device, arg) : arg for arg in args)...)
+end
+
+function abstractize_array_args!(ex, f_type)
+    @assert Meta.isexpr(ex, :function)
+    head = ex.args[1]
+    @assert Meta.isexpr(head, :call)
+
+    for (i, arg) in enumerate(Iterators.drop(head.args, 1))
+        @assert Meta.isexpr(arg, :(::), 2)
+        if i == 1
+            arg.args[2] = f_type
+            continue
+        end
+        typ = arg.args[2]
+
+        if typ <: AbstractArray
+            arg.args[2] = AbstractArray{typ.parameters...}
+        end
+    end
 end
 
 function lower_tape!(cg)
@@ -1084,7 +1114,7 @@ julia> compiled_f(Float32[2.]) # runs the compiled version
 2.0f0
 ```
 """
-function compile(f; verbose=false, discard_first_outputs=false)
+function compile(f; verbose=false, discard_first_outputs=false, device=IREE.Device("local-task"), hal_target="llvm-cpu")
     compiled_f = nothing
     return (args...) -> begin
         if isnothing(compiled_f)
@@ -1094,7 +1124,7 @@ function compile(f; verbose=false, discard_first_outputs=false)
             out, tape = _trace(f, args...)
             verbose && display(tape)
 
-            compiled_f = compile_tape(tape, args...; verbose)
+            compiled_f = compile_tape(tape, args...; verbose, device, hal_target)
 
             if discard_first_outputs
                 Base.invokelatest(compiled_f, args...)
@@ -1186,7 +1216,7 @@ with_debug(io::IO, val) = show(IOContext(io, :debug => true), val)
 
 ### Compile utils
 
-function compile_to_bytecode(module_; input_type=MLIR.get_input_type(module_))
+function compile_to_bytecode(module_; input_type=MLIR.get_input_type(module_), hal_target="llvm-cpu")
     input_type ∈ (
         :none,
         :mhlo,
@@ -1198,8 +1228,8 @@ function compile_to_bytecode(module_; input_type=MLIR.get_input_type(module_))
     pm = MLIR.PassManager(module_.context)
     op_pass = MLIR.OpPassManager(pm)
     options = IREE.CompilerOptions([
-        "--iree-hal-target-backends=llvm-cpu",
-        string("--iree-input-type=", input_type),
+        "--iree-hal-target-backends=$hal_target",
+        "--iree-input-type=$input_type",
     ])
 
     IREE.build_vm_pass_pipeline!(op_pass, options)
@@ -1208,15 +1238,15 @@ function compile_to_bytecode(module_; input_type=MLIR.get_input_type(module_))
     return IREE.translate_module_to_vm_bytecode(module_, options)
 end
 
-function get_session()
+function get_session(driver="local-task")
     instance = IREE.Instance()
-    device = IREE.Device(instance)
+    device = IREE.Device(instance, string(driver))
 
     session_options = IREE.SessionOptions()
     IREE.Session(instance, session_options, device)
 end
 
-function get_call(module_, name)
+function get_call(module_, name, device, hal_target)
     mod_op = MLIR.get_operation(module_)
     block = MLIR.get_first_block(mod_op)
 
@@ -1236,11 +1266,12 @@ function get_call(module_, name)
 
             return_transposed_attr = MLIR.get_attribute_by_name(op, Passes.COIL_RETURN_TRANSPOSED_ATTR_NAME)
             return_transposed = !isnothing(return_transposed_attr) && MLIR.get_bool_value(return_transposed_attr)
+            break
         end
     end
 
-    bytecode = compile_to_bytecode(module_)
-    session = get_session()
+    bytecode = compile_to_bytecode(module_; hal_target)
+    session = IREE.Session(IREE.Instance(), IREE.SessionOptions(), device)
 
     IREE.append_bytecode!(session, bytecode)
 
@@ -1298,16 +1329,21 @@ end
 
 import Adapt, Functors
 
-struct BufferViewAdaptor
-    session::IREE.Session
+struct BufferViewDeviceAdaptor
+    device::IREE.Device
+    col_major::Bool
 end
 
-function Adapt.adapt_storage(adaptor::BufferViewAdaptor, a::AbstractArray)
-    BufferView(adaptor.session, a)
+function Adapt.adapt_storage(adaptor::BufferViewDeviceAdaptor, a::AbstractArray)
+    adaptor.col_major ?
+    IREE.ColMajorBufferView(adaptor.device, a) :
+    BufferView(adaptor.device, a)
 end
 
-iree(session, x) = Functors.fmap(
-    x -> Adapt.adapt(BufferViewAdaptor(session), x), x
+iree(device, x) = Functors.fmap(
+    x -> Adapt.adapt(BufferViewDeviceAdaptor(device, true), x), x
 )
+
+vulkan(x) = iree(IREE.Device("vulkan"), x)
 
 end # module Tracing
