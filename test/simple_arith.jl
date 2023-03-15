@@ -105,3 +105,14 @@ end
     y = randn(Float32, 3, 3)
     @test cf(x, y) ≈ cf(x, y)
 end
+
+@testset "Tracing: matmul" begin
+    cf = Coil.compile((x, y) -> x * y)
+
+    x = randn(Float32, 3, 4)
+    y = randn(Float32, 4, 5)
+
+    @test size(cf(x, y)) == (3, 5)
+    @test size(cf(x, y)) == (3, 5)
+    @test x * y ≈ cf(x, y)
+end

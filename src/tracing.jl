@@ -142,9 +142,7 @@ function is_tensor(tape::Tape{Context}, v::Umlaut.Variable)
     ctx = tape.c
     v = bound(tape, v)
     haskey(ctx.operands, v) &&
-        MLIR.is_tensor(get_type(ctx.operands[v]))
-    # v = bound(tape, v)
-    # haskey(tape.c.shapes, v)
+        MLIR.is_tensor(get_type(ctx.operands[v])) || v.op.typ <: AbstractArray{<:Real}
 end
 is_tensor(_, other) = false
 
