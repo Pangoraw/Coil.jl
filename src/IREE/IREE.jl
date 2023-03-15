@@ -1,8 +1,9 @@
 module IREE
 
-import Base.Libc.Libdl
+import Libdl
+import Artifacts
 
-const libiree = expanduser("~/Projects/iree-build/lib/libIREECompiler.so.0")
+const libiree = joinpath(Artifacts.artifact"libIREECompiler", "lib", "libIREECompiler.so.0")
 if !isfile(libiree)
     error("🔴🔴🔴 '$libiree' not found, try changing its definition at $(@__FILE__):$(@__LINE__() - 2)")
 end

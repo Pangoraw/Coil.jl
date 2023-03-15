@@ -125,7 +125,7 @@ module {
 
 ### Control flow
 
-Due to its use of [Umlaut.jl](https://github.com/dfdx/Umlaut.jl), all control flow from the input function is taken as is for the first given arguments. This means that loops and conditions are unrolled when applied to the linear tape.  
+Due to its use of [Umlaut.jl](https://github.com/dfdx/Umlaut.jl), all control flow from the input function is taken as is for the first given arguments. This means that loops and conditions are unrolled when applied to the linear tape.
 
 ## Building
 
@@ -144,16 +144,25 @@ cmake -GNinja -B ../iree-build/ -S . \
     -DIREE_HAL_DRIVER_VULKAN=on \
     -DIREE_TARGET_BACKEND_VULKAN_SPIRV=on \
     -DIREE_ENABLE_LLD=ON
+cd ../iree-build
+ninja libiree_runtime_runtime_shared.so
 ```
 
-This will create the two required libraries in the `iree-build/` folder:
+This will build the runtime library in the `iree-build/` folder. The runtime library (`lib_runtime_shared_shared`) contains the bytecode interpreter and hardware drivers to run IREE programs.
 
- - The compiler library (`libIREECompiler`) containing MLIR and IREE specific passes.
- - The runtime library (`lib_runtime_shared_shared`) containing the bytecode interpreter and drivers to run IREE programs.
+The compiler library (`libIREECompiler`) containing MLIR and IREE specific passes is downloaded using artifacts from [the official releases](https://github.com/openxla/iree/releases) (Linux x86_64 glibc only) when the package is instantiated.
 
 Later, these libraries will be provided as _jll packages built using [Binary Builder](https://binarybuilder.org).
 
+## Dependencies
+
+This package is tested only on the Julia 1.9 release, therefore a special version of [CompilerPluginTools.jl](https://github.com/JuliaCompilerPlugins/CompilerPluginTools.jl) should be installed (see [CompilerPluginTools.jl#9](https://github.com/JuliaCompilerPlugins/CompilerPluginTools.jl/pull/9)):
+
+```
+(Coil) pkg> add https://github.com/JuliaCompilerPlugins/CompilerPluginTools.jl#roger/fix-1.9
+```
+
 ## References
 
- - [ONNX.jl](https://github.com/FluxML/ONNX.jl) - Coil take a very similar approach to ONNX.jl but lowers down to MLIR modules instead of ONNX operations. 
- - [XLA.jl](https://github.com/FluxML/XLA.jl) - XLA lowers from Julia IR down to XLA HLO and can execute to TPU. Interestingly, the tensor shape inference is embedded in Julia's type system whereas Coil uses the runtime values collected during tracing.
+ - [ONNX.jl](https://github.com/FluxML/ONNX.jl) - Coil takes a very similar approach to ONNX.jl but lowers down to MLIR modules instead of ONNX operations. 
+ - [XLA.jl](https://github.com/JuliaTPU/XLA.jl) - XLA lowers from Julia IR down to XLA HLO and can execute to TPU. Interestingly, the tensor shape inference is embedded in Julia's type system whereas Coil uses the runtime values collected during tracing.

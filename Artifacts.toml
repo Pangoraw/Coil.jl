@@ -1,0 +1,9 @@
+[[libIREECompiler]]
+arch = "x86_64"
+git-tree-sha1 = "66f7309631f64fc09e8e4a16e3d4c2749315a837"
+libc = "glibc"
+os = "linux"
+
+    [[libIREECompiler.download]]
+    sha256 = "1267110ea807ab956f63048b6dff2c0e6be5010cb72182d2f51196a248b7e45c"
+    url = "https://github.com/openxla/iree/releases/download/candidate-20230228.444/iree-dist-20230228.444-linux-x86_64.tar.xz"

@@ -1,5 +1,7 @@
 module Coil
 
+include("utils.jl")
+
 include("MLIR/MLIR.jl")
 include("IREE/IREE.jl")
 
