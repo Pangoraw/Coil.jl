@@ -134,7 +134,7 @@ To build [IREE](https://github.com/iree-org/iree) to be used as a shared library
 ```bash
 git clone https://github.com/Pangoraw/iree
 cd iree
-git checkout build_coil
+git checkout build_coil2
 git submodule update --init
 cmake -GNinja -B ../iree-build/ -S . \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -144,8 +144,7 @@ cmake -GNinja -B ../iree-build/ -S . \
     -DIREE_HAL_DRIVER_VULKAN=on \
     -DIREE_TARGET_BACKEND_VULKAN_SPIRV=on \
     -DIREE_ENABLE_LLD=ON
-cd ../iree-build
-ninja libiree_runtime_runtime_shared.so
+cmake --build ../iree-build --target iree_runtime_runtime_shared
 ```
 
 This will build the runtime library in the `iree-build/` folder. The runtime library (`lib_runtime_shared_shared`) contains the bytecode interpreter and hardware drivers to run IREE programs.
