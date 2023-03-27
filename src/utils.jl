@@ -22,13 +22,12 @@ macro cvcall(call, ver="VER_0")
 
     quote
         $(esc(f)) = let
-            handles = $(handles)
-            handle = get!(handles, $(esc(lib))) do
-                Libdl.dlopen($(esc(lib)))
-            end
-
             ref = $(ref)
             if ref[] == C_NULL
+                handles = $(handles)
+                handle = get!(handles, $(esc(lib))) do
+                    Libdl.dlopen($(esc(lib)))
+                end
                 ref[] = dlvsym(handle, $(name), $(esc(ver)))
             end
             @assert ref[] != C_NULL
