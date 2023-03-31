@@ -219,6 +219,7 @@ mlirNamedAttributeGet(name, attr) =
 mlirRegionCreate() = @cvcall libmlir.mlirRegionCreate()::MlirRegion
 mlirRegionDestroy(region) = @cvcall libmlir.mlirRegionDestroy(region::MlirRegion)::Cvoid
 mlirRegionIsNull(region) = mlirIsNull(region)
+mlirRegionEqual(region, other) = @cvcall libmlir.mlirRegionEqual(region::MlirRegion, other::MlirRegion)::Bool
 mlirRegionAppendOwnedBlock(region, block) = @cvcall libmlir.mlirRegionAppendOwnedBlock(region::MlirRegion, block::MlirBlock)::Cvoid
 mlirRegionInsertOwnedBlock(region, pos, block) =
     @cvcall libmlir.mlirRegionInsertOwnedBlock(region::MlirRegion, pos::intptr_t, block::MlirBlock)::Cvoid
@@ -251,6 +252,7 @@ mlirBlockPrint(block, callback, userdata) =
     @cvcall libmlir.mlirBlockAddArgument(block::MlirBlock, callback::Ptr{Cvoid}, userdata::Any)::Cvoid
 mlirBlockGetNextInRegion(block) = @cvcall libmlir.mlirBlockGetNextInRegion(block::MlirBlock)::MlirBlock
 mlirBlockGetFirstOperation(block) = @cvcall libmlir.mlirBlockGetFirstOperation(block::MlirBlock)::MlirOperation
+mlirBlockGetParentRegion(block) = @cvcall libmlir.mlirBlockGetParentRegion(block::MlirBlock)::MlirRegion
 
 ### Value
 
@@ -308,22 +310,22 @@ mlirOperationStateGet(name, location) =
 mlirOperationStateAddResults(state, n, results) =
     @cvcall libmlir.mlirOperationStateAddResults(
         state::Ptr{MlirOperationState},
-        n::intptr_t, results::Ptr{MlirType}
+        n::intptr_t, results::Ptr{MlirType},
     )::Cvoid
 mlirOperationStateAddOperands(state, n, operands) =
     @cvcall libmlir.mlirOperationStateAddOperands(
         state::Ptr{MlirOperationState},
-        n::intptr_t, operands::Ptr{MlirValue}
+        n::intptr_t, operands::Ptr{MlirValue},
     )::Cvoid
 mlirOperationStateAddOwnedRegions(state, n, regions) =
     @cvcall libmlir.mlirOperationStateAddOwnedRegions(
         state::Ptr{MlirOperationState},
-        n::intptr_t, regions::Ptr{MlirRegion}
+        n::intptr_t, regions::Ptr{MlirRegion},
     )::Cvoid
 mlirOperationStateAddSuccessors(state, n, successors) =
     @cvcall libmlir.mlirOperationStateAddSuccessors(
         state::Ptr{MlirOperationState},
-        n::intptr_t, successors::Ptr{MlirBlock}
+        n::intptr_t, successors::Ptr{MlirBlock},
     )::Cvoid
 mlirOperationStateAddAttributes(state, n, attributes) =
     @cvcall libmlir.mlirOperationStateAddAttributes(

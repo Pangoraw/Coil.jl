@@ -224,7 +224,7 @@ function build_mlir_block(mlir_ctx, targs)
         argvals[argn] = MLIR.get_argument(block, i)
     end
 
-    block, argvals 
+    block, argvals
 end
 
 function Tracer(ircode::IRCode, f, targs)
@@ -290,7 +290,7 @@ function invoke!(tracer, inst, rettype)
         argvals = map(arg -> const_val(tracer, arg), args)
         return f(argvals...)
     end
-    
+
     if f == emit_and_run
         op = gen_mlir(tracer.mlir_ctx, const_val(tracer, args[1]), [
             mlir_val(tracer, arg)
@@ -310,17 +310,11 @@ function invoke!(tracer, inst, rettype)
     (; mlir_ctx,) = tracer
 
     entry, argvals = build_mlir_block(mlir_ctx, targs)
+    push!(tracer.region, entry)
+
     ssavals = Vector{Any}(undef, length(ircode.stmts))
 
-    push!(tracer.region, entry)
-    push!(tracer.current_block, cf.br(mlir_ctx, entry, [
-        argvals[i]
-        for i in eachindex(argvals)
-        if isassigned(argvals, i)
-    ]))
-
     ret_block = Block([mlir_type(mlir_ctx, rettype)], [Location(mlir_ctx)])
-    MLIR.insert_after!(tracer.region, entry, ret_block)
 
     new_tracer = Tracer(
         mlir_ctx, tracer.region,
@@ -330,6 +324,15 @@ function invoke!(tracer, inst, rettype)
         f, targs,
     )
     trace!(new_tracer)
+
+    # perform call using cf.br
+    push!(tracer.current_block, cf.br(mlir_ctx, entry, [
+        mlir_val(tracer, arg)
+        for arg in args
+        if !isconst(tracer, arg)
+    ]))
+
+    MLIR.insert_after!(tracer.region, new_tracer.current_block, ret_block)
 
     tracer.current_block = ret_block
     MLIR.get_argument(ret_block, 1)
@@ -407,10 +410,13 @@ function gen_fn(tracer::Tracer)
     MLIR.add_owned_regions!(fn_state, [tracer.region])
 
     fn = MLIR.Operation(fn_state)
+    mlir_module = MLIR.MModule(mlir_ctx)
+    mlir_module_body = MLIR.get_body(mlir_module)
+    push!(mlir_module_body, fn)
 
-    MLIR.verifyall(fn)
+    MLIR.verifyall(mlir_module)
 
-    fn
+    mlir_module
 end
 
 function compile2(f, Targs)

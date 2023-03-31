@@ -612,7 +612,7 @@ end
 # https://mlir.llvm.org/docs/Dialects/ControlFlowDialect/#cfbr-mlircfbranchop
 function br(context, dest, operands; loc=Location(context))
     state = OperationState("cf.br", loc)
-    MLIR.add_successors!(state, [dest])
+    MLIR.add_successors!(state, MLIR.Block[dest])
     MLIR.add_operands!(state, collect(operands))
     Operation(state)
 end
