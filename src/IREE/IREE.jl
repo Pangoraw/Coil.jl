@@ -8,7 +8,7 @@ if !isfile(libiree)
     error("🔴🔴🔴 '$libiree' not found, try changing its definition at $(@__FILE__):$(@__LINE__() - 2)")
 end
 const libiree_runtime = (expanduser("~/Projects/iree-build/runtime/src/iree/runtime/libiree_runtime_runtime_shared.so"))
-if !isfile(libiree_runtime)
+if false && !isfile(libiree_runtime)
     error("🔴🔴🔴 '$libiree_runtime' not found, try changing its definition at $(@__FILE__):$(@__LINE__() - 2)")
 end
 

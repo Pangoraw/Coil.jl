@@ -19,7 +19,8 @@ export
 export
     add_results!,
     add_attributes!,
-    add_owned_regions!
+    add_owned_regions!,
+    add_successors!
 
 import Base: ==, String
 using .LibMLIR:
@@ -442,7 +443,7 @@ struct Value
     end
 end
 
-get_type(value) = MType(LibMLIR.mlirValueGetType(value))
+get_type(value::Value) = MType(LibMLIR.mlirValueGetType(value))
 
 Base.convert(::Type{MlirValue}, value::Value) = value.value
 Base.size(value::Value) = Base.size(get_type(value))
@@ -454,10 +455,10 @@ function Base.show(io::IO, value::Value)
     GC.@preserve ref LibMLIR.mlirValuePrint(value, c_print_callback, ref)
 end
 
-is_a_op_result(value) = LibMLIR.mlirValueIsAOpResult(value)
-is_a_block_argument(value) = LibMLIR.mlirValueIsABlockArgument(value)
+is_a_op_result(value::Value) = LibMLIR.mlirValueIsAOpResult(value)
+is_a_block_argument(value::Value) = LibMLIR.mlirValueIsABlockArgument(value)
 
-function set_type!(value, type)
+function set_type!(value::Value, type)
     @assert is_a_block_argument(value) "could not set type, value is not a block argument"
     LibMLIR.mlirBlockArgumentSetType(value, type)
     value
@@ -481,7 +482,7 @@ function get_owner(value::Value)
     return Operation(raw_op, false)
 end
 
-function get_first_use(value)
+function get_first_use(value::Value)
     raw_op_operand = LibMLIR.mlirValueGetFirstUse(value)
     if LibMLIR.mlirOpOperandIsNull(raw_op_operand)
         return nothing
@@ -574,6 +575,8 @@ function add_owned_regions!(state, regions)
 end
 add_attributes!(state, attributes) =
     LibMLIR.mlirOperationStateAddAttributes(state, length(attributes), attributes)
+add_successors!(state, succs) =
+    LibMLIR.mlirOperationStateAddSuccessors(state, length(succs), succs)
 
 enable_type_inference!(state) =
     LibMLIR.mlirOperationStateEnableResultTypeInference(state)
@@ -694,6 +697,7 @@ mutable struct Block
         @assert !LibMLIR.mlirBlockIsNull(block) "cannot create Block with null MlirBlock"
         finalizer(new(block, owned)) do block
             if block.owned
+                @async @info "finalizing block"
                 LibMLIR.mlirBlockDestroy(block.block)
             end
         end
