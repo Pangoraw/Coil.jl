@@ -19,7 +19,8 @@ export
 export
     add_results!,
     add_attributes!,
-    add_owned_regions!
+    add_owned_regions!,
+    add_successors!
 
 import Base: ==, String
 using .LibMLIR:
@@ -442,7 +443,7 @@ struct Value
     end
 end
 
-get_type(value) = MType(LibMLIR.mlirValueGetType(value))
+get_type(value::Value) = MType(LibMLIR.mlirValueGetType(value))
 
 Base.convert(::Type{MlirValue}, value::Value) = value.value
 Base.size(value::Value) = Base.size(get_type(value))
@@ -454,10 +455,10 @@ function Base.show(io::IO, value::Value)
     GC.@preserve ref LibMLIR.mlirValuePrint(value, c_print_callback, ref)
 end
 
-is_a_op_result(value) = LibMLIR.mlirValueIsAOpResult(value)
-is_a_block_argument(value) = LibMLIR.mlirValueIsABlockArgument(value)
+is_a_op_result(value::Value) = LibMLIR.mlirValueIsAOpResult(value)
+is_a_block_argument(value::Value) = LibMLIR.mlirValueIsABlockArgument(value)
 
-function set_type!(value, type)
+function set_type!(value::Value, type)
     @assert is_a_block_argument(value) "could not set type, value is not a block argument"
     LibMLIR.mlirBlockArgumentSetType(value, type)
     value
@@ -481,7 +482,7 @@ function get_owner(value::Value)
     return Operation(raw_op, false)
 end
 
-function get_first_use(value)
+function get_first_use(value::Value)
     raw_op_operand = LibMLIR.mlirValueGetFirstUse(value)
     if LibMLIR.mlirOpOperandIsNull(raw_op_operand)
         return nothing
@@ -574,6 +575,11 @@ function add_owned_regions!(state, regions)
 end
 add_attributes!(state, attributes) =
     LibMLIR.mlirOperationStateAddAttributes(state, length(attributes), attributes)
+add_successors!(state, successors) =
+    LibMLIR.mlirOperationStateAddSuccessors(
+        state, length(successors),
+        convert(Vector{LibMLIR.MlirBlock}, successors),
+    )
 
 enable_type_inference!(state) =
     LibMLIR.mlirOperationStateEnableResultTypeInference(state)
@@ -693,7 +699,7 @@ mutable struct Block
     Block(block, owned=true) = begin
         @assert !LibMLIR.mlirBlockIsNull(block) "cannot create Block with null MlirBlock"
         finalizer(new(block, owned)) do block
-            if block.owned
+            if @atomic block.owned
                 LibMLIR.mlirBlockDestroy(block.block)
             end
         end
@@ -735,6 +741,14 @@ end
 add_argument!(block::Block, type, loc) =
     Value(LibMLIR.mlirBlockAddArgument(block, type, loc))
 
+function get_parent_region(block::Block)
+    raw_region = LibMLIR.mlirBlockGetParentRegion(block)
+    if LibMLIR.mlirRegionIsNull(raw_region)
+        return nothing
+    end
+    Region(raw_region, false)
+end
+
 Base.convert(::Type{MlirBlock}, block::Block) = block.block
 
 function lose_ownership!(block::Block)
@@ -758,7 +772,7 @@ mutable struct Region
     Region(region, owned=true) = begin
         @assert !LibMLIR.mlirRegionIsNull(region)
         finalizer(new(region, owned)) do region
-            if region.owned
+            if @atomic region.owned
                 LibMLIR.mlirRegionDestroy(region.region)
             end
         end
@@ -768,10 +782,12 @@ end
 Region() = Region(LibMLIR.mlirRegionCreate())
 
 function Base.push!(region::Region, block::Block)
+    @assert isnothing(get_parent_region(block)) "block is already in a region"
     LibMLIR.mlirRegionAppendOwnedBlock(region, lose_ownership!(block))
     block
 end
 function Base.insert!(region::Region, pos, block::Block)
+    @assert isnothing(get_parent_region(block)) "block is already in a region"
     LibMLIR.mlirRegionInsertOwnedBlock(region, pos - 1, lose_ownership!(block))
     block
 end
@@ -779,16 +795,24 @@ function Base.pushfirst!(region::Region, block)
     insert!(region, 1, block)
     block
 end
-insert_after!(region::Region, reference::Block, block::Block) =
+function insert_after!(region::Region, reference::Block, block::Block)
+    @assert isnothing(get_parent_region(block)) "block is already in a region"
     LibMLIR.mlirRegionInsertOwnedBlockAfter(region, reference, lose_ownership!(block))
-insert_before!(region::Region, reference::Block, block::Block) =
+    block
+end
+function insert_before!(region::Region, reference::Block, block::Block)
+    @assert isnothing(get_parent_region(block)) "block is already in a region"
     LibMLIR.mlirRegionInsertOwnedBlockBefore(region, reference, lose_ownership!(block))
+    block
+end
 
 function get_first_block(region::Region)
     block = iterate(BlockIterator(region))
     isnothing(block) && return nothing
     first(block)
 end
+
+Base.:(==)(region::Region, other::Region) = LibMLIR.mlirRegionEqual(region, other)
 
 function lose_ownership!(region::Region)
     @assert region.owned
@@ -1096,7 +1120,7 @@ function Base.iterate(it::RegionIterator)
     end
 end
 
-function Base.iterate(it::RegionIterator, region)
+function Base.iterate(::RegionIterator, region)
     raw_region = LibMLIR.mlirRegionGetNextInOperation(region)
     if LibMLIR.mlirRegionIsNull(raw_region)
         nothing

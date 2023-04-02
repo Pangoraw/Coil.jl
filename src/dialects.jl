@@ -431,6 +431,17 @@ function reduce_window(
     Operation(state)
 end
 
+# https://www.tensorflow.org/mlir/hlo_ops#mhloreverse_mlirmhloreverseop
+function reverse(context, operand, dims; loc=Location(context))
+    state = OperationState("mhlo.reverse", loc)
+    add_operands!(state, MLIR.Value[operand])
+    add_attributes!(state, [
+        NamedAttribute(context, "dimensions", Attribute(context, collect(dims .- 1))),
+    ])
+    add_results!(state, [MLIR.get_type(operand)])
+    Operation(state)
+end
+
 function convolution(
     context,
     output_type,
@@ -594,3 +605,44 @@ end
 
 end # module mhlo
 
+module cf
+
+using ..MLIR
+
+# https://mlir.llvm.org/docs/Dialects/ControlFlowDialect/#cfassert-mlircfassertop
+function assert(context, cond, message; loc=Location(context))
+    state = OperationState("cf.assert", loc)
+    add_operands!(state, [cond])
+    add_attributes!(state, [
+        MLIR.NamedAttribute(context, "msg",
+            Attribute(context, message)),
+    ])
+    Operation(state)
+end
+
+# https://mlir.llvm.org/docs/Dialects/ControlFlowDialect/#cfbr-mlircfbranchop
+function br(context, dest, operands; loc=Location(context))
+    state = OperationState("cf.br", loc)
+    MLIR.add_successors!(state, MLIR.Block[dest])
+    MLIR.add_operands!(state, collect(operands))
+    Operation(state)
+end
+
+# https://mlir.llvm.org/docs/Dialects/ControlFlowDialect/#cfcond_br-mlircfcondbranchop
+function cond_br(
+    context, cond,
+    truedest, truedest_operands,
+    falsedest, falsedest_operands;
+    loc=Location(context),
+)
+    state = OperationState("cf.cond_br", loc)
+    add_successors!(state, [truedest, falsedest])
+    add_operands!(state, [
+        cond,
+        truedest_operands...,
+        falsedest_operands...,
+    ])
+    Operation(state)
+end
+
+end # module cf

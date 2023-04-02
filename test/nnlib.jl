@@ -26,4 +26,23 @@ import Coil
         @test f(x) == cf(x)
         @test f(x) == cf(x)
     end
+
+    @testset "conv" begin
+        w = reshape(Float32[
+            2 0
+            0 1
+        ], 2, 2, 1, 1)
+        x = reshape(Float32[
+            2 0
+            0 1
+        ], 2, 2, 1, 1)
+        cdims = NNlib.DenseConvDims(x, w)
+
+        cconv = Coil.compile(NNlib.conv)
+        @test cconv(x, w, cdims) == cconv(x, w, cdims) == NNlib.conv(x, w, cdims)
+
+        cconv = Coil.compile(NNlib.conv)
+        cdims = NNlib.DenseConvDims(x, w; flipkernel=true)
+        @test cconv(x, w, cdims) == cconv(x, w, cdims) == NNlib.conv(x, w, cdims)
+    end
 end

@@ -522,8 +522,11 @@ function lower_call!(cg, ::OpConfig{typeof(NNlib.conv)}, op)
     @assert length(op.args) == 3 "lowering NNlib.conv: currently only supported conv(::AbstractArray, ::AbstractArray, ::DenseConvDims)"
     operands = get_arg_operands!(cg, op, op.args[begin:end-1])
 
-    input_type = MLIR.get_type(first(operands))
-    weight_type = MLIR.get_type(last(operands))
+    xop, wop = operands
+
+    input_type = MLIR.get_type(xop)
+    weight_type = MLIR.get_type(wop)
+    @assert ndims(input_type) == 4 "NNlib.conv: only 2d convolution is currently supported"
     W, H, _, B = size(input_type)
 
     cdims = value(op.args[end])
@@ -547,11 +550,23 @@ function lower_call!(cg, ::OpConfig{typeof(NNlib.conv)}, op)
     dilation = Int64[dw, dh]
     strides = Int64[sw, sh]
 
+    if !cdims.flipkernel
+        reverse_op = push!(block,
+            mhlo.reverse(
+                mlir_ctx,
+                wop,
+                [1, 2];
+                loc=Location(mlir_ctx, op.line),
+            )
+        )
+        wop = get_result(reverse_op)
+    end
+
     conv0 = push!(block,
         mhlo.convolution(
             mlir_ctx,
             output_type,
-            operands,
+            [xop, wop],
             padding,
             dilation,
             strides;
@@ -741,8 +756,7 @@ end
 function lower_arith!(cg, op)
     (; mlir_ctx, block, tape) = cg
 
-    if false && !cg.allow_scalar_args &&
-            all(arg -> !is_tensor(tape, arg), op.args)
+    if !cg.allow_scalar_args && all(arg -> !is_tensor(tape, arg), op.args)
         return
     end
 
@@ -915,7 +929,7 @@ function lower_call!(cg, op)
     end
 end
 
-function compile_to_module(tape, args...; verbose)
+function compile_to_module(tape, args...; verbose, allow_scalar_args)
     ctx = tape.c
     func_name = ctx.f isa Function ? nameof(ctx.f) : nameof(typeof(ctx.f))
     typeof_args = args = map(Core.Typeof, args)
@@ -923,7 +937,7 @@ function compile_to_module(tape, args...; verbose)
 
     mlir_ctx = MLIR.Context()
     IREE.register_all_dialects!(mlir_ctx)
-    for dialect in ("builtin", "func", "mhlo", "arith", "math", "tosa", "linalg", "tensor")
+    for dialect in ("builtin", "func", "mhlo", "arith", "math", "tosa", "linalg", "tensor", "cf")
         MLIR.get_or_load_dialect(mlir_ctx, dialect)
     end
 
@@ -934,7 +948,7 @@ function compile_to_module(tape, args...; verbose)
 
     block = Block(MType[], Location[])
 
-    allow_scalar_args = any(arg -> arg.op.typ <: Real, inputs(tape))
+    # allow_scalar_args = any(arg -> arg.op.typ <: Real, inputs(tape))
 
     cg_context = CodegenContext(mlir_ctx, block, tape, verbose, allow_scalar_args)
     lower_tape!(cg_context)
@@ -944,7 +958,7 @@ function compile_to_module(tape, args...; verbose)
         last_computed = maximum(v -> v.id, keys(ctx.operands))
         last_variable = Umlaut.Variable(last_computed)
         op = tape[last_variable]
-        throw("failed to compute a graph for the function @ $(op.line)")
+        throw("failed to compute a graph for the function @ $(op.line) $(allow_scalar_args)")
     end
 
     result_operand = ctx.operands[bound(tape, tape.result)]
@@ -979,11 +993,17 @@ function compile_to_module(tape, args...; verbose)
     return mlir_module
 end
 
-function compile_tape(tape, args...; verbose=haskey(ENV, "COIL_VERBOSE"), device, hal_target)
+function compile_tape(
+    tape, args...;
+    verbose=haskey(ENV, "COIL_VERBOSE"),
+    device,
+    hal_target,
+    allow_scalar_args,
+)
     ctx = tape.c
     func_name = ctx.f isa Function ? nameof(ctx.f) : nameof(typeof(ctx.f))
 
-    mlir_module = compile_to_module(tape, args...; verbose)
+    mlir_module = compile_to_module(tape, args...; verbose, allow_scalar_args)
 
     # Apply row-major -> col-major passes
 
@@ -1070,6 +1090,7 @@ function _trace(f, args...; ctx=Context(f))
     if Umlaut.isprimitive(ctx, f, args...)
         out = f(args...)
         tape = Umlaut.Tape(ctx)
+        push!(tape, Umlaut.Input(f))
         vargs = map(arg -> push!(tape, Umlaut.Input(arg)), args)
         tape.result = Umlaut.record_primitive!(tape, f, vargs...)
         return out, tape
@@ -1078,7 +1099,12 @@ function _trace(f, args...; ctx=Context(f))
 end
 
 """
-  compile(f; verbose::Bool=false, discard_first_outputs::Bool=false)::Function
+  compile(
+    f;
+    verbose::Bool=false,
+    discard_first_outputs::Bool=false,
+    allow_scalar_args::Bool=false,
+  )::Function
 
 Returns a compiled version of the provided function which will
 lazily be compiled + specialized on its arguments on the first call to this function.
@@ -1112,7 +1138,7 @@ julia> compiled_f(Float32[2.]) # runs the compiled version
 2.0f0
 ```
 """
-function compile(f; verbose=false, discard_first_outputs=false, device=IREE.Device("local-task"), hal_target="llvm-cpu")
+function compile(f; verbose=false, discard_first_outputs=false, device=IREE.Device("local-task"), hal_target="llvm-cpu", allow_scalar_args=false)
     compiled_f = nothing
     return (args...) -> begin
         if isnothing(compiled_f)
@@ -1122,7 +1148,7 @@ function compile(f; verbose=false, discard_first_outputs=false, device=IREE.Devi
             out, tape = _trace(f, args...)
             verbose && display(tape)
 
-            compiled_f = compile_tape(tape, args...; verbose, device, hal_target)
+            compiled_f = compile_tape(tape, args...; verbose, device, hal_target, allow_scalar_args)
 
             if discard_first_outputs
                 Base.invokelatest(compiled_f, args...)

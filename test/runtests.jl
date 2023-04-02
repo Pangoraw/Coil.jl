@@ -10,7 +10,7 @@ include("./nnlib.jl")
 
 @testset "Simple add function" begin
     @testset "Simple add function: $T" for T in (Int8, Int16, Int32, Int64, Float32, Float64)
-        func = Coil.compile((a, b) -> a + b)
+        func = Coil.compile((a, b) -> a + b, allow_scalar_args=true)
 
         for t in 1:2
             r = T(1):T(10)
