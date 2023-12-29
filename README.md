@@ -49,14 +49,15 @@ MModule:
 module {
   func.func @f(%arg0: tensor<3xf32>) -> f32 {
     %cst = arith.constant dense<0.000000e+00> : tensor<f32>
-    %reduced = linalg.reduce ins(%arg0 : tensor<3xf32>) outs(%cst : tensor<f32>) dimensions = [0]
+    %reduced = linalg.reduce ins(%arg0 : tensor<3xf32>) outs(%cst : tensor<f
+32>) dimensions = [0] 
       (%in: f32, %init: f32) {
         %1 = math.exp %in : f32
         %2 = arith.addf %1, %init : f32
         linalg.yield %2 : f32
       }
     %c0 = arith.constant 0 : index
-    %0 = mhlo.reshape %reduced : (tensor<f32>) -> tensor<1xf32>
+    %0 = stablehlo.reshape %reduced : (tensor<f32>) -> tensor<1xf32>
     %extracted = tensor.extract %0[%c0] : tensor<1xf32>
     return %extracted : f32
   }
@@ -112,13 +113,18 @@ julia> Coil.@code_mlir dense(x)
 MModule:
 module {
   func.func @Dense(%arg0: tensor<6x3xf32>, %arg1: tensor<3x1xf32>, %arg2: tensor<6xf32>) -> tensor<6x1xf32> {
-    %0 = "mhlo.dot"(%arg0, %arg1) : (tensor<6x3xf32>, tensor<3x1xf32>) -> tensor<6x1xf32>
-    %1 = "mhlo.broadcast_in_dim"(%arg2) {broadcast_dimensions = dense<0> : tensor<1xi64>} : (tensor<6xf32>) -> tensor<6x1xf32>
-    %2 = mhlo.add %0, %1 : tensor<6x1xf32>
-    %3 = tensor.empty() : tensor<6x1xf32>
+    %c1_i64 = arith.constant 1 : i64
+    %c1_i64_0 = arith.constant 1 : i64
+    %0 = arith.addi %c1_i64, %c1_i64_0 : i64
+    %c2_i64 = arith.constant 2 : i64
+    %c1_i64_1 = arith.constant 1 : i64
+    %1 = arith.addi %c2_i64, %c1_i64_1 : i64
+    %2 = stablehlo.dot %arg0, %arg1 : (tensor<6x3xf32>, tensor<3x1xf32>) -> tensor<6x1xf32>
+    %3 = stablehlo.broadcast_in_dim %arg2, dims = [0] : (tensor<6xf32>) -> tensor<6x1xf32>
+    %4 = stablehlo.add %2, %3 : tensor<6x1xf32>
     %cst = arith.constant dense<0.000000e+00> : tensor<6x1xf32>
-    %3 = arith.maxf %2, %cst : tensor<6x1xf32>
-    return %3 : tensor<6x1xf32>
+    %5 = arith.maximumf %4, %cst : tensor<6x1xf32>
+    return %5 : tensor<6x1xf32>
   }
 }
 ```

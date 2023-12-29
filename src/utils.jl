@@ -8,10 +8,13 @@ const handles = Dict{String,Ptr{Cvoid}}()
 The `libIREECompiler.so` shared library provided in the GitHub releases is stripped and
 versionned using glibc, we use `dlvsym` to recover the symbols.
 """
-macro cvcall(call, ver="VER_0")
-    @assert Meta.isexpr(call, :(::))
+macro cvcall(call, ver="IREE_API_0.0")
+    # uncomment to have regular ccall behavior
+    # return var"@ccall"(__source__, __module__, call)
+
+    @assert Meta.isexpr(call, :(::)) call
     def = call.args[1].args[1]
-    @assert Meta.isexpr(def, :(.), 2)
+    @assert Meta.isexpr(def, :(.), 2) call
     lib, name = def.args
 
     f = gensym(:func)
@@ -30,7 +33,7 @@ macro cvcall(call, ver="VER_0")
                 end
                 ref[] = dlvsym(handle, $(name), $(esc(ver)))
             end
-            @assert ref[] != C_NULL
+            @assert ref[] != C_NULL $(name)
 
             ref[]
         end

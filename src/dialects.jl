@@ -2,12 +2,10 @@ module func
 # https://mlir.llvm.org/docs/Dialects/Func/
 
 using ..MLIR
-using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
+using ..MLIR: get_type, julia_type
 
-function return_(context, operands; loc=Location(context))
-    state = OperationState("func.return", loc)
-    MLIR.add_operands!(state, operands)
-    Operation(state)
+function return_(operands; loc=Location())
+    MLIR.create_operation("func.return", loc; operands, results=[])
 end
 
 end # module func
@@ -16,14 +14,13 @@ module math
 # https://mlir.llvm.org/docs/Dialects/MathOps/
 
 using ..MLIR
-using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
+using ..MLIR: get_type, julia_type
 
 for op in (:cos, :sin, :tan, :tanh, :exp, :sqrt)
-    @eval function $op(context, operand; loc=Location(context))
-        state = OperationState($(string("math.", op)), loc)
-        MLIR.add_operands!(state, [operand])
-        MLIR.add_results!(state, [MLIR.get_type(operand)])
-        Operation(state)
+    @eval function $op(operand; loc=Location())
+        MLIR.create_operation($(string("math.", op)), loc;
+            operands=[operand],
+            results=[MLIR.get_type(operand)])
     end
 end
 
@@ -33,102 +30,86 @@ module arith
 # https://mlir.llvm.org/docs/Dialects/ArithOps/
 
 using ..MLIR
-using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
+using ..MLIR: get_type, julia_type
 
 for (f, t) in Iterators.product(
     (:add, :sub, :mul),
     (:i, :f),
 )
     fname = Symbol(f, t)
-    @eval function $fname(context, operands, type=MLIR.get_type(first(operands)); loc=Location(context))
-        state = OperationState($(string("arith.", fname)), loc)
-        MLIR.add_operands!(state, operands)
-        MLIR.add_results!(state, [type])
-        Operation(state)
+    @eval function $fname(operands, type=MLIR.get_type(first(operands)); loc=Location())
+        MLIR.create_operation($(string("arith.", fname)), loc; operands, results=[type])
     end
 end
 
 for (f, t) in Iterators.product(
     (:div, :max, :min),
-    (:si, :ui, :f),
+    (:si, :ui),
 )
     fname = Symbol(f, t)
-    @eval function $fname(context, operands, type=MLIR.get_type(first(operands)); loc=Location(context))
-        state = OperationState($(string("arith.", fname)), loc)
-        MLIR.add_operands!(state, operands)
-        MLIR.add_results!(state, [type])
-        Operation(state)
+    @eval function $fname(operands, type=MLIR.get_type(first(operands)); loc=Location())
+        MLIR.create_operation($(string("arith.", fname)), loc; operands, results=[type])
+    end
+end
+
+for f in (:div, :maximum, :minimum)
+    fname = Symbol(f, "f")
+    @eval function $fname(operands, type=MLIR.get_type(first(operands)); loc=Location())
+        MLIR.create_operation($(string("arith.", fname)), loc; operands, results=[type])
     end
 end
 
 # https://mlir.llvm.org/docs/Dialects/ArithOps/#arithindex_cast-mlirarithindexcastop
 for f in (:index_cast, :index_castui)
-    @eval function $f(context, operand; loc=Location(context))
-        state = OperationState($(string("arith.", f)), loc)
-        add_operands!(state, [operand])
-        add_results!(state, [MLIR.IndexType(context)])
-        Operation(state)
+    @eval function $f(operand; loc=Location())
+        MLIR.create_operation($(string("arith.", f)), loc;
+            operands=[operand],
+            results=[MLIR.IndexType()])
     end
 end
 
 # https://mlir.llvm.org/docs/Dialects/ArithOps/#arithextf-mlirarithextfop
-function extf(context, operand, type; loc=Location(context))
-    state = OperationState("arith.exf", loc)
-    MLIR.add_results!(state, [type])
-    MLIR.add_operands!(state, [operand])
-    Operation(state)
+function extf(operand, type; loc=Location())
+    MLIR.create_operation("arith.exf", loc; operands=[operand], results=[type])
 end
 
 # https://mlir.llvm.org/docs/Dialects/ArithOps/#arithsitofp-mlirarithsitofpop
-function sitofp(context, operand, ftype=float(julia_type(eltype(get_type(operand)))); loc=Location(context))
-    state = OperationState("arith.sitofp", loc)
+function sitofp(operand, ftype=float(julia_type(eltype(get_type(operand)))); loc=Location())
     type = get_type(operand)
-    MLIR.add_results!(state, [
+    MLIR.create_operation("arith.sitofp", loc; operands=[operand], results=[
         MLIR.is_tensor(type) ?
-        MType(context, ftype isa MType ? eltype(ftype) : MType(context, ftype), size(type)) :
-        MType(context, ftype)
+        MLIRType(ftype isa MLIRType ? eltype(ftype) : MLIRType(ftype), size(type)) :
+        MLIRType(ftype)
     ])
-    MLIR.add_operands!(state, [operand])
-    Operation(state)
 end
 
 # https://mlir.llvm.org/docs/Dialects/ArithOps/#arithfptosi-mlirarithfptosiop
-function fptosi(context, operand, itype; loc=Location(context))
-    state = OperationState("arith.fptosi", loc)
+function fptosi(operand, itype; loc=Location())
     type = get_type(operand)
-    MLIR.add_results!(state, [
+    MLIR.create_operation("arith.fptosi", loc; operands=[operand], results=[
         MLIR.is_tensor(type) ?
-        MType(context, itype isa MType ? itype : MType(context, itype), size(type)) :
-        MType(context, itype)
+        MLIRType(itype isa MLIRType ? itype : MLIRType(itype), size(type)) :
+        MLIRType(itype)
     ])
-    MLIR.add_operands!(state, [operand])
-    Operation(state)
 end
 
 # https://mlir.llvm.org/docs/Dialects/ArithOps/#arithconstant-mlirarithconstantop
 function constant(
-    context, values::AbstractArray,
-    type=MType(context, MType(context, eltype(values)), size(values));
-    loc=Location(context))
+    values::AbstractArray,
+    type=MLIRType(MLIRType(eltype(values)), size(values));
+    loc=Location())
 
-    state = OperationState("arith.constant", loc)
-    MLIR.add_results!(state, [type])
-    MLIR.add_attributes!(state, [
-        MLIR.NamedAttribute(context, "value",
-            Attribute(context, values, type)),
+    MLIR.create_operation("arith.constant", loc; results=[type], attributes=[
+        MLIR.NamedAttribute("value",
+            Attribute(values, type)),
     ])
-    Operation(state)
 end
 
 # https://mlir.llvm.org/docs/Dialects/ArithOps/#arithconstant-mlirarithconstantop
-function constant(context, value, type=MType(context, typeof(value)); loc=Location(context))
-    state = OperationState("arith.constant", loc)
-    MLIR.add_results!(state, [type])
-    MLIR.add_attributes!(state, [
-        MLIR.NamedAttribute(context, "value",
-            Attribute(context, value, type)),
+function constant(value, type=MLIRType(typeof(value)); loc=Location())
+    MLIR.create_operation("arith.constant", loc; results=[type], attributes=[
+        MLIR.NamedAttribute("value", Attribute(value, type)),
     ])
-    Operation(state)
 end
 
 end # module arith
@@ -137,68 +118,59 @@ module tosa
 # https://mlir.llvm.org/docs/Dialects/TOSA/
 
 using ..MLIR
-using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
+using ..MLIR: get_type, julia_type
 
 # https://mlir.llvm.org/docs/Dialects/TOSA/#tosamaximum-mlirtosamaximumop
 # https://mlir.llvm.org/docs/Dialects/TOSA/#tosaminimum-mlirtosaminimumop
 for f in (:maximum, :minimum)
-    @eval function $f(context, operands; loc=Location(context))
-        state = OperationState($(string("tosa.", f)), loc)
-        MLIR.add_operands!(state, operands)
-        MLIR.add_results!(state, [MLIR.get_type(first(operands))])
-        Operation(state)
+    @eval function $f(operands; loc=Location())
+        MLIR.create_operation($(string("tosa.", f)), loc; operands,
+            results=[MLIR.get_type(first(operands))])
     end
 end
 
 # https://mlir.llvm.org/docs/Dialects/TOSA/#tosaconst-mlirtosaconstop
-function const_(context, value, type=MType(context, typeof(value), size(value)); loc=Location(context))
-    state = OperationState("tosa.const", loc)
-    MLIR.add_results!(state, [type])
-    MLIR.add_attributes!(state, [
-        MLIR.NamedAttribute(context, "value",
-            Attribute(context, value, type)),
+function const_(value, type=MLIRType(typeof(value), size(value)); loc=Location())
+    MLIR.create_operation("tosa.const", loc; results=[type], attributes=[
+        MLIR.NamedAttribute("value",
+            Attribute(value, type)),
     ])
-    Operation(state)
 end
 
 # https://mlir.llvm.org/docs/Dialects/TOSA/#tosareshape-mlirtosareshapeop
-function reshape(context, operand, shape; loc=Location(context))
-    state = OperationState("tosa.reshape", loc)
-    out_type = MType(context, eltype(MLIR.get_type(operand)), shape)
-    add_results!(state, [out_type])
-    add_operands!(state, [operand])
-    add_attributes!(state, [
-        NamedAttribute(context, "new_shape", MLIR.ArrayAttribute(context, collect(shape)))
-    ])
-    Operation(state)
+function reshape(operand, shape; loc=Location())
+    out_type = MLIRType(eltype(MLIR.get_type(operand)), shape)
+    MLIR.create_operation("tosa.reshape", loc;
+        results=[out_type],
+        operands=[operand],
+        attributes=[
+            NamedAttribute("new_shape", MLIR.ArrayAttribute(collect(shape)))
+        ])
 end
 
 # https://mlir.llvm.org/docs/Dialects/TOSA/#tosareduce_sum-mlirtosareducesumop
-function reduce_sum(context, input, axis; loc=Location(context))
-    state = OperationState("tosa.reduce_sum", loc)
-
+function reduce_sum(input, axis; loc=Location())
     type = get_type(input)
     input_shape = size(type)
     output_shape = [i == axis ? 1 : d for (i, d) in enumerate(input_shape)]
 
-    add_results!(state, [MType(context, eltype(type), output_shape)])
-    add_operands!(state, [input])
-    add_attributes!(state, [
-        NamedAttribute(context, "axis", Attribute(context, axis - 1))
-    ])
-
-    Operation(state)
+    MLIR.create_operation("tosa.reduce_sum", loc;
+        results=[MLIRType(eltype(type), output_shape)],
+        operands=[input],
+        attributes=[
+            NamedAttribute("axis", Attribute(axis - 1))
+        ])
 end
 
 #=
 #https://mlir.llvm.org/docs/Dialects/TOSA/#tosamax_pool2d-mlirtosamaxpool2dop
-function maxpool_2d(context, operand, kernel, stride, pad; loc=Location(context))
-    state = OperationState("tosa.maxpool_2d", loc)
-    add_operands!(state, [operand])
-    add_attributes!(state, [
-        NamedAttribute(context, "kernel", Attribute(context, kernel)),
-        NamedAttribute(context, "stride", Attribute(context, stride))
-        NamedAttribute(context, "pad", Attribute(context, pad))
+function maxpool_2d(operand, kernel, stride, pad; loc=Location())
+    MLIR.create_operation("tosa.maxpool_2d", loc;
+    operands=[operand],
+    attributes=[
+        NamedAttribute("kernel", Attribute(kernel)),
+        NamedAttribute("stride", Attribute(stride))
+        NamedAttribute("pad", Attribute(pad))
     ])
     input_type = get_type(operand)
     input_size = input_size
@@ -212,58 +184,77 @@ end # module tosa
 module linalg
 
 using ..MLIR
-using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
+using ..MLIR: get_type, julia_type
 
-# https://mlir.llvm.org/docs/Dialects/Linalg/#linalgmap-mlirlinalgmapop
-function map(context, inner_block, in, out; loc=Location(context))
-    state = OperationState("linalg.map", loc)
+
+function map_as_generic(inner_block, in, out; loc=Location())
     region = Region()
     push!(region, inner_block)
-    MLIR.add_owned_regions!(state, [region])
-    MLIR.add_results!(state, [MLIR.get_type(out)])
-    MLIR.add_operands!(state, [in, out])
-    Operation(state)
+
+    typ = MLIR.get_type(in)
+    MLIR.push_argument!(inner_block, eltype(typ), loc)
+
+    affine_map = MLIR.API.mlirAffineMapMultiDimIdentityGet(MLIR.context(), ndims(typ))
+    affine_map_attr = MLIR.Attribute(MLIR.API.mlirAffineMapAttrGet(affine_map))
+    iterator_attr = parse(Attribute, "#linalg.iterator_type<parallel>")
+
+    MLIR.create_operation("linalg.generic", loc;
+        owned_regions=[region],
+        results=[typ],
+        operands=[in, out],
+        attributes=[
+            NamedAttribute("indexing_maps", MLIR.ArrayAttribute([affine_map_attr, affine_map_attr])),
+            NamedAttribute("iterator_types", MLIR.ArrayAttribute([iterator_attr for _ in 1:ndims(typ)])),
+            NamedAttribute("operand_segment_sizes", MLIR.DenseArrayAttribute(Int32[1,1])),
+        ],
+    )
+end
+
+# https://mlir.llvm.org/docs/Dialects/Linalg/#linalgmap-mlirlinalgmapop
+function map(inner_block, in, out; loc=Location())
+    region = Region()
+    push!(region, inner_block)
+
+    MLIR.create_operation("linalg.map", loc;
+        owned_regions=[region],
+        results=[MLIR.get_type(out)],
+        operands=[in, out])
 end
 
 # https://mlir.llvm.org/docs/Dialects/Linalg/#linalgreduce-mlirlinalgreduceop
 function reduce(
-    context,
     inner_block,
     operands,
     dims=1:ndims(get_type(in));
-    loc=Location(context)
+    loc=Location()
 )
-    state = OperationState("linalg.reduce", loc)
     region = Region()
     push!(region, inner_block)
-    MLIR.add_owned_regions!(state, [region])
-    add_results!(state, [get_type(last(operands))])
-    add_operands!(state, operands)
-    add_attributes!(state, [
-        NamedAttribute(context, "dimensions",
-            MLIR.DenseArrayAttribute(context, collect(dims .- 1))),
-    ])
-    Operation(state)
+    MLIR.create_operation("linalg.reduce", loc;
+        owned_regions=[region],
+        results=[get_type(last(operands))],
+        operands,
+        attributes=[
+            NamedAttribute("dimensions",
+                MLIR.DenseArrayAttribute(collect(dims .- 1))),
+        ])
 end
 
 # https://mlir.llvm.org/docs/Dialects/Linalg/#linalgyield-mlirlinalgyieldop
-function yield(context, operand; loc=Location(context))
-    state = OperationState("linalg.yield", loc)
-    MLIR.add_operands!(state, [operand])
-    Operation(state)
+function yield(operand; loc=Location())
+    MLIR.create_operation("linalg.yield", loc; operands=[operand], results=[])
 end
 
 # https://mlir.llvm.org/docs/Dialects/Linalg/#linalgfill-mlirlinalgfillop
-function fill(context, operands...; loc=Location(context))
-    state = OperationState("linalg.fill", loc)
-    MLIR.add_owned_regions!(state, [Region()])
-    add_operands!(state, collect(operands))
-    add_results!(state, [get_type(last(operands))])
-    add_attributes!(state, [
-        NamedAttribute(context, "operand_segment_sizes",
-            Attribute(context, collect(Int32.(length.(size.(get_type.(operands))))))),
-    ])
-    Operation(state)
+function fill(operands...; loc=Location())
+    MLIR.create_operation("linalg.fill", loc;
+        owned_regions=[Region()],
+        operands=collect(operands),
+        results=[get_type(last(operands))],
+        attributes=[
+            NamedAttribute("operand_segment_sizes",
+                Attribute(collect(Int32.(length.(size.(get_type.(operands))))))),
+        ])
 end
 
 end # module linalg
@@ -271,54 +262,56 @@ end # module linalg
 module tensor
 
 using ..MLIR
-using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
+using ..MLIR: get_type, julia_type
+
+# https://mlir.llvm.org/docs/Dialects/TensorOps/#tensorinsert-tensorinsertop
+function insert(scalar, dest, indices...; loc=Location())
+    MLIR.create_operation("tensor.insert", loc;
+                          results=[MLIR.get_type(dest)],
+                          operands=Value[scalar, dest, indices...])
+end
 
 # https://mlir.llvm.org/docs/Dialects/TensorOps/#tensorempty-mlirtensoremptyop
-function empty(context, type; loc=Location(context))
-    state = OperationState("tensor.empty", loc)
-    MLIR.add_results!(state, [type])
-    Operation(state)
+function empty(type; loc=Location())
+    MLIR.create_operation("tensor.empty", loc;
+        results=[type])
 end
 
 # https://mlir.llvm.org/docs/Dialects/TensorOps/#tensorextract-mlirtensorextractop
-function extract(context, operand, I...; loc=Location(context))
-    state = OperationState("tensor.extract", loc)
-    MLIR.add_results!(state, [eltype(get_type(operand))])
-    MLIR.add_operands!(state, [operand, I...])
-    Operation(state)
+function extract(operand, I...; loc=Location())
+    MLIR.create_operation("tensor.extract", loc;
+        results=[eltype(get_type(operand))],
+        operands=[operand, I...])
 end
 
 # Using https://mlir.llvm.org/docs/Dialects/TensorOps/#tensorcollapse_shape-mlirtensorcollapseshapeop
-function transpose(context, operand, perm; loc=Location(context))
+function transpose(operand, perm; loc=Location())
     reassociation = [[d] for d in perm]
-    tensor.collapse_shape(context, operand, reassociation; loc)
+    tensor.collapse_shape(operand, reassociation; loc)
 end
 
 # https://mlir.llvm.org/docs/Dialects/TensorOps/#tensorcollapse_shape-mlirtensorcollapseshapeop
-function collapse_shape(context, operand, reassociation; loc=Location(context))
-    state = OperationState("tensor.collapse_shape", loc)
-    MLIR.add_operands!(state, [operand])
-    MLIR.add_attributes!(state, [
-        MLIR.NamedAttribute(
-            context, "reassociation",
-            MLIR.ArrayAttribute(
-                context,
-                [MLIR.ArrayAttribute(context, Int64.(dim_assoc .- 1))
-                 for dim_assoc in reassociation],
-            ),
-        )
-    ])
-
+function collapse_shape(operand, reassociation; loc=Location())
     input_type = MLIR.get_type(operand)
     input_size = size(input_type)
     output_size = [
         prod([input_size[i] for i in dim_assoc])
         for dim_assoc in reassociation
     ]
-    output_type = MType(context, eltype(input_type), output_size)
-    MLIR.add_results!(state, [output_type])
+    output_type = MLIRType(eltype(input_type), output_size)
 
-    Operation(state)
+    MLIR.create_operation("tensor.collapse_shape", loc;
+        operands=[operand],
+        attributes=[
+            MLIR.NamedAttribute(
+                "reassociation",
+                MLIR.ArrayAttribute(
+                    [MLIR.ArrayAttribute(Int64.(dim_assoc .- 1))
+                     for dim_assoc in reassociation],
+                ),
+            )
+        ],
+        results=[output_type])
 end
 
 end # module tensor
@@ -326,31 +319,28 @@ end # module tensor
 module mhlo
 
 using ..MLIR
-using ..MLIR: get_type, julia_type, add_operands!, add_results!, add_attributes!
+using ..MLIR: get_type, julia_type
 
-function dot(context, operands; loc=Location(context))
-    state = OperationState("mhlo.dot", loc)
-    MLIR.add_operands!(state, operands)
+function dot(operands; loc=Location())
     Ta = MLIR.get_type(first(operands))
     sa = size(Ta)
     Tb = MLIR.get_type(last(operands))
     sb = size(Tb)
     output_size = (sa[begin], sb[end])
-    result_type = MType(context, eltype(Ta), output_size)
-    MLIR.add_results!(state, [result_type])
-    Operation(state)
+    result_type = MLIRType(eltype(Ta), output_size)
+
+    MLIR.create_operation("mhlo.dot", loc; operands,
+        results=[result_type])
 end
 
-function reshape(context, operand, shape; loc=Location(context))
-    state = OperationState("mhlo.reshape", loc)
-    out_type = MType(context, eltype(MLIR.get_type(operand)), shape)
-    MLIR.add_results!(state, [out_type])
-    MLIR.add_operands!(state, [operand])
-    Operation(state)
+function reshape(operand, shape; loc=Location())
+    out_type = MLIRType(eltype(MLIR.get_type(operand)), shape)
+    MLIR.create_operation("mhlo.reshape", loc;
+        results=[out_type],
+        operands=[operand])
 end
 
-function transpose(context, operand, perm; loc=Location(context))
-    state = OperationState("mhlo.transpose", loc)
+function transpose(operand, perm; loc=Location())
 
     input_type = MLIR.get_type(operand)
     input_shape = size(input_type)
@@ -358,55 +348,49 @@ function transpose(context, operand, perm; loc=Location(context))
         input_shape[i]
         for i in perm
     ]
-    out_type = MType(context, eltype(input_type), out_shape)
-    MLIR.add_operands!(state, [operand])
-    MLIR.add_results!(state, [out_type])
-    MLIR.add_attributes!(state, [
-        MLIR.NamedAttribute(
-            context, "permutation",
-            MLIR.Attribute(context, collect(Int64.(perm) .- 1)),
-        ),
-    ])
+    out_type = MLIRType(eltype(input_type), out_shape)
 
-    Operation(state)
+    MLIR.create_operation("mhlo.transpose", loc;
+        operands=[operand],
+        results=[out_type],
+        attributes=[
+            MLIR.NamedAttribute(
+                "permutation",
+                MLIR.Attribute(collect(Int64.(perm) .- 1)),
+            ),
+        ])
 end
 
-function return_(context, operand; loc=Location(context))
-    state = OperationState("mhlo.return", loc)
-    MLIR.add_operands!(state, [operand])
-    Operation(state)
+function return_(operand; loc=Location())
+    MLIR.create_operation("mhlo.return", loc;
+        operands=[operand], results=[])
 end
 
-function map(context, block, operand, dims=collect(1:ndims(operand)); loc=Location(context))
-    state = OperationState("mhlo.map", loc)
+function map(block, operand, dims=collect(1:ndims(operand)); loc=Location())
 
     region = Region()
     push!(region, block)
 
-    MLIR.add_owned_regions!(state, [region])
-    MLIR.add_operands!(state, [operand])
-    MLIR.add_results!(state, [MLIR.get_type(operand)])
-    MLIR.add_attributes!(state, [
-        MLIR.NamedAttribute(
-            context, "dimensions",
-            MLIR.Attribute(context, collect(dims .- 1)),
-        ),
-    ])
-
-    Operation(state)
+    MLIR.create_operation("mhlo.map", loc;
+        owned_regions=[region],
+        operands=[operand],
+        results=[MLIR.get_type(operand)],
+        attributes=[
+            MLIR.NamedAttribute(
+                "dimensions",
+                MLIR.Attribute(collect(dims .- 1)),
+            ),
+        ])
 end
 
 for f in (:minimum, :maximum, :add, :substract, :divide, :multiply)
-    @eval function $f(context, operands, out_type=MLIR.get_type(first(operands)); loc=Location(context))
-        state = OperationState($(string("mhlo.", f)), loc)
-        MLIR.add_results!(state, [out_type])
-        MLIR.add_operands!(state, operands)
-        Operation(state)
+    @eval function $f(operands, out_type=MLIR.get_type(first(operands)); loc=Location())
+        MLIR.create_operation($(string("mhlo.", f)), loc;
+            results=[out_type], operands)
     end
 end
 
 function reduce_window(
-    context,
     operands,
     region,
     window_dimensions,
@@ -415,74 +399,69 @@ function reduce_window(
     window_dilations,
     padding,
     output_type;
-    loc=Location(context)
+    loc=Location()
 )
-    state = OperationState("mhlo.reduce_window", loc)
-    add_owned_regions!(state, [region])
-    add_results!(state, [output_type])
-    add_attributes!(state, [
-        NamedAttribute(context, "window_dimensions", Attribute(context, collect(Int64.(window_dimensions)))),
-        NamedAttribute(context, "window_strides", Attribute(context, collect(Int64.(window_strides)))),
-        NamedAttribute(context, "base_dilations", Attribute(context, collect(Int64.(base_dilations)))),
-        NamedAttribute(context, "window_dilations", Attribute(context, collect(Int64.(window_dilations)))),
-        NamedAttribute(context, "padding", Attribute(context, collect(Int64.(padding)))),
-    ])
-    add_operands!(state, collect(operands))
-    Operation(state)
+    MLIR.create_operation("mhlo.reduce_window", loc;
+        owned_regions=[region],
+        results=[output_type],
+        attributes=[
+            NamedAttribute("window_dimensions", Attribute(collect(Int64.(window_dimensions)))),
+            NamedAttribute("window_strides", Attribute(collect(Int64.(window_strides)))),
+            NamedAttribute("base_dilations", Attribute(collect(Int64.(base_dilations)))),
+            NamedAttribute("window_dilations", Attribute(collect(Int64.(window_dilations)))),
+            NamedAttribute("padding", Attribute(collect(Int64.(padding)))),
+        ],
+        operands=collect(operands))
 end
 
 # https://www.tensorflow.org/mlir/hlo_ops#mhloreverse_mlirmhloreverseop
-function reverse(context, operand, dims; loc=Location(context))
-    state = OperationState("mhlo.reverse", loc)
-    add_operands!(state, MLIR.Value[operand])
-    add_attributes!(state, [
-        NamedAttribute(context, "dimensions", Attribute(context, collect(dims .- 1))),
-    ])
-    add_results!(state, [MLIR.get_type(operand)])
-    Operation(state)
+function reverse(operand, dims; loc=Location())
+    MLIR.create_operation("mhlo.reverse", loc;
+        operands=MLIR.Value[operand],
+        attributes=[
+            NamedAttribute("dimensions", Attribute(collect(dims .- 1))),
+        ],
+        results=[MLIR.get_type(operand)])
 end
 
 function convolution(
-    context,
     output_type,
     operands,
     padding,
     rhs_dilation,
-    window_strides; loc=Location(context)
+    window_strides; loc=Location()
 )
-    state = OperationState("mhlo.convolution", loc)
-    MLIR.add_attributes!(state, [
-        NamedAttribute(context, "batch_group_count", Attribute(context, 1)),
-        NamedAttribute(context, "dimension_numbers", parse(
-            Attribute,
-            context,
-            """
-            #mhlo.conv<raw
-              input_batch_dimension = 3,
-              input_feature_dimension = 2,
-              input_spatial_dimensions = [0, 1],
-              kernel_output_feature_dimension = 3,
-              kernel_input_feature_dimension = 2,
-              kernel_spatial_dimensions = [0, 1],
-              output_batch_dimension = 3,
-              output_feature_dimension = 2,
-              output_spatial_dimensions = [0, 1],
-            >
-            """
-        )),
-        NamedAttribute(context, "feature_group_count", Attribute(context, 1)),
-        NamedAttribute(context, "padding", Attribute(context, padding)),
-        NamedAttribute(context, "rhs_dilation", Attribute(context, rhs_dilation)),
-        NamedAttribute(context, "lhs_dilation", Attribute(context, ones(Int64, length(rhs_dilation)))),
-        NamedAttribute(context, "window_strides", Attribute(context, window_strides)),
-        # NamedAttribute(context, "feature_group_count", Attribute(context, 1)),
-        # NamedAttribute(context, "padding", Attribute(context, fill(2, 2, 2))),
-        # NamedAttribute(context, "rhs_dilation", Attribute(context, )),
-        # NamedAttribute(context, "window_strides", Attribute(context, [4, 4])),
-    ])
-    MLIR.add_results!(state, [output_type])
-    MLIR.add_operands!(state, operands)
-    Operation(state)
+    MLIR.create_operation("mhlo.convolution", loc;
+        attributes=[
+            NamedAttribute("batch_group_count", Attribute(1)),
+            NamedAttribute("dimension_numbers", parse(
+                Attribute,
+                """
+                #mhlo.conv<raw
+                  input_batch_dimension = 3,
+                  input_feature_dimension = 2,
+                  input_spatial_dimensions = [0, 1],
+                  kernel_output_feature_dimension = 3,
+                  kernel_input_feature_dimension = 2,
+                  kernel_spatial_dimensions = [0, 1],
+                  output_batch_dimension = 3,
+                  output_feature_dimension = 2,
+                  output_spatial_dimensions = [0, 1],
+                >
+                """
+            )),
+            NamedAttribute("feature_group_count", Attribute(1)),
+            NamedAttribute("padding", Attribute(padding)),
+            NamedAttribute("rhs_dilation", Attribute(rhs_dilation)),
+            NamedAttribute("lhs_dilation", Attribute(ones(Int64, length(rhs_dilation)))),
+            NamedAttribute("window_strides", Attribute(window_strides)),
+            # NamedAttribute("feature_group_count", Attribute(1)),
+            # NamedAttribute("padding", Attribute(fill(2, 2, 2))),
+            # NamedAttribute("rhs_dilation", Attribute()),
+            # NamedAttribute("window_strides", Attribute([4, 4])),
+        ],
+        results=[output_type],
+        operands)
 end
 
 """
@@ -517,65 +496,62 @@ function _compute_broadcast_dims(input_size, broadcast_size)
     broadcast_dimensions
 end
 
-function broadcast_in_dim(context, operand, new_size; loc=Location(context))
-    state = OperationState("mhlo.broadcast_in_dim", loc)
-    MLIR.add_operands!(state, [operand])
+function broadcast_in_dim(operand, new_size; loc=Location())
     type = MLIR.get_type(operand)
 
     type_size = size(type)
     broadcast_dimensions = _compute_broadcast_dims(type_size, new_size)
 
-    MLIR.add_results!(state, [
-        MType(context, eltype(type), new_size),
-    ])
-    MLIR.add_attributes!(state, [
-        MLIR.NamedAttribute(
-            context, "broadcast_dimensions",
-            Attribute(context, broadcast_dimensions .- 1),
-        )
-    ])
-    Operation(state)
+    MLIR.create_operation("mhlo.broadcast_in_dim", loc;
+        operands=[operand],
+        results=[
+            MLIRType(eltype(type), new_size),
+        ],
+        attributes=[
+            MLIR.NamedAttribute(
+                "broadcast_dimensions",
+                Attribute(broadcast_dimensions .- 1),
+            )
+        ])
 end
 
-function compare(context, operands, direction; loc=Location(context))
-    state = OperationState("mhlo.compare", loc)
-    MLIR.add_operands!(state, operands)
-    MLIR.add_results!(state, [MType(context, MType(context, Bool), ())])
-    MLIR.add_attributes!(state, [
-        NamedAttribute(
-            context, "comparison_direction",
-            parse(Attribute, context, "#mhlo<comparison_direction $direction>"),
-        ),
-    ])
-    Operation(state)
+function compare(operands, direction; loc=Location())
+    MLIR.create_operation("mhlo.compare", loc;
+        operands,
+        results=[MLIRType(MLIRType(Bool), ())],
+        attributes=[
+            NamedAttribute(
+                "comparison_direction",
+                parse(Attribute, "#mhlo<comparison_direction $direction>"),
+            ),
+        ])
 end
 
-function if_(context, cond, result, block1, block2; loc=Location(context))
-    state = OperationState("mhlo.if", loc)
-    MLIR.add_operands!(state, [cond])
-    MLIR.add_results!(state, [result])
+function if_(cond, result, block1, block2; loc=Location())
 
     region1 = Region()
     push!(region1, block1)
     region2 = Region()
     push!(region2, block2)
-    MLIR.add_owned_regions!(state, [region1, region2])
 
-    Operation(state)
+    MLIR.create_operation("mhlo.if", loc;
+        operands=[cond],
+        results=[result],
+        owned_regions=[region1, region2])
 end
 
-function constant(context, value; loc=Location(context))
-    etype = MType(context, eltype(value))
-    ranked_type = MType(context, etype, size(value))
-    state = OperationState("mhlo.constant", loc)
-    MLIR.add_results!(state, [ranked_type,])
-    MLIR.add_attributes!(state, [
-        MLIR.NamedAttribute(context, "value", Attribute(context, fill(value)))
-    ])
-    Operation(state)
+function constant(value; loc=Location())
+    etype = MLIRType(eltype(value))
+    ranked_type = MLIRType(etype, size(value))
+
+    MLIR.create_operation("mhlo.constant", loc;
+        results=[ranked_type,],
+        attributes=[
+            MLIR.NamedAttribute("value", Attribute(fill(value)))
+        ])
 end
 
-function reduce(context, inner_block, operands, dims; loc=Location(context))
+function reduce(inner_block, operands, dims; loc=Location())
     input_type = MLIR.get_type(first(operands))
     input_size = size(input_type)
 
@@ -585,22 +561,18 @@ function reduce(context, inner_block, operands, dims; loc=Location(context))
         for (i, s) in enumerate(input_size)
         if i ∉ dims
     ]
-    output_type = MType(context, etype, output_dim)
+    output_type = MLIRType(etype, output_dim)
 
     region = Region()
     push!(region, inner_block)
 
-    state = OperationState("mhlo.reduce", loc)
-    MLIR.add_owned_regions!(state, [region])
-
-    MLIR.add_results!(state, [output_type])
-    MLIR.add_attributes!(state, [
-        NamedAttribute(context, "dimensions",
-            Attribute(context, collect(dims .- 1))),
-    ])
-    MLIR.add_operands!(state, operands)
-
-    Operation(state)
+    MLIR.create_operation("mhlo.reduce", loc;
+        owned_regions=[region],
+        results=[output_type],
+        attributes=[
+            NamedAttribute("dimensions",
+                Attribute(collect(dims .- 1))),
+        ], operands)
 end
 
 end # module mhlo
@@ -610,39 +582,253 @@ module cf
 using ..MLIR
 
 # https://mlir.llvm.org/docs/Dialects/ControlFlowDialect/#cfassert-mlircfassertop
-function assert(context, cond, message; loc=Location(context))
-    state = OperationState("cf.assert", loc)
-    add_operands!(state, [cond])
-    add_attributes!(state, [
-        MLIR.NamedAttribute(context, "msg",
-            Attribute(context, message)),
-    ])
-    Operation(state)
+function assert(cond, message; loc=Location())
+    MLIR.create_operation("cf.assert", loc;
+        operands=[cond],
+        attributes=[
+            MLIR.NamedAttribute("msg",
+                Attribute(message)),
+        ])
 end
 
 # https://mlir.llvm.org/docs/Dialects/ControlFlowDialect/#cfbr-mlircfbranchop
-function br(context, dest, operands; loc=Location(context))
-    state = OperationState("cf.br", loc)
-    MLIR.add_successors!(state, MLIR.Block[dest])
-    MLIR.add_operands!(state, collect(operands))
-    Operation(state)
+function br(dest, operands; loc=Location())
+    MLIR.create_operation("cf.br", loc;
+        successors=MLIR.Block[dest],
+        operands=collect(operands))
 end
 
 # https://mlir.llvm.org/docs/Dialects/ControlFlowDialect/#cfcond_br-mlircfcondbranchop
 function cond_br(
-    context, cond,
+    cond,
     truedest, truedest_operands,
     falsedest, falsedest_operands;
-    loc=Location(context),
+    loc=Location()
 )
-    state = OperationState("cf.cond_br", loc)
-    add_successors!(state, [truedest, falsedest])
-    add_operands!(state, [
-        cond,
-        truedest_operands...,
-        falsedest_operands...,
-    ])
-    Operation(state)
+    MLIR.create_operation("cf.cond_br", loc;
+        successors=[truedest, falsedest],
+        operands=[
+            cond,
+            truedest_operands...,
+            falsedest_operands...,
+        ])
 end
 
 end # module cf
+
+module stablehlo
+using ..MLIR
+
+function func(ftype; loc=Location())
+    MLIR.create_operation("stablehlo.func", loc)
+end
+
+function return_(operands...; loc=Location())
+    MLIR.create_operation("stablehlo.return", loc;
+                          operands=collect(operands))
+end
+
+# https://github.com/openxla/stablehlo/blob/main/docs/spec.md#reshape
+function reshape(operand, size; loc=Location())
+    input_type = MLIR.get_type(operand)
+    output_type = MLIRType(eltype(input_type), size)
+    MLIR.create_operation("stablehlo.reshape", loc;
+        operands=[operand],
+        results=[output_type])
+end
+
+# https://github.com/openxla/stablehlo/blob/main/docs/spec.md#select
+function select(pred, on_true, on_false; loc=Location())
+    MLIR.create_operation("stablehlo.select", loc;
+        operands=[pred, on_true, on_false],
+        results=[MLIR.get_type(on_true)])
+end
+
+for op in (
+    :add, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#add
+    :and, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#and
+    :divide, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#divide
+    :maximum, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#maximum
+    :minimum, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#minimum
+    :multiply, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#multiply
+    :or, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#or
+    :power, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#power
+    :subtract, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#subtract
+)
+    @eval function $op(operands; loc=Location())
+        MLIR.create_operation($(string("stablehlo.", op)), loc;
+                             results=[MLIR.get_type(first(operands))],
+                             operands)
+    end
+end
+
+for op in (
+    :cosine, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#cosine
+    :exponential, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#exponential
+    :exponential_minus_one, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#exponential_minus_one
+    :floor, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#floor
+    :log, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#log
+    :log_plus_one, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#log_plus_one
+    :logistic, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#logistic
+    :negate, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#negate
+    :not, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#not
+    :reverse, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#reverse
+    :rsqrt, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#rsqrt
+    :sine, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#sine
+    :sqrt, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#sqrt
+    :tanh, # https://github.com/openxla/stablehlo/blob/main/docs/spec.md#tanh
+)
+    @eval function $op(operand; loc=Location())
+        MLIR.create_operation($(string("stablehlo.", op)), loc;
+                            results=[MLIR.get_type(operand)],
+                            operands=[operand])
+    end
+end
+
+function constant(
+    values::AbstractArray,
+    type=MLIRType(MLIRType(eltype(values)), size(values));
+    loc=Location())
+
+    MLIR.create_operation("stablehlo.constant", loc; results=[type], attributes=[
+        MLIR.NamedAttribute("value",
+            Attribute(values, type)),
+    ])
+end
+
+# https://mlir.llvm.org/docs/Dialects/ArithOps/#arithconstant-mlirarithconstantop
+function constant(value, type=MLIRType(typeof(value)); loc=Location())
+    MLIR.create_operation("stablehlo.constant", loc; results=[type], attributes=[
+        MLIR.NamedAttribute("value", Attribute(value, type)),
+    ])
+end
+
+# https://github.com/openxla/stablehlo/blob/main/docs/spec.md#get_dimension_size
+function get_dimension_size(operand, dimension; loc=Location())
+    MLIR.create_operation("stablehlo.get_dimension_size", loc;
+        results=[MLIRType(Int32, ())],
+        operands=[operand])
+end
+
+function transpose(operand, perm; loc=Location())
+
+    input_type = MLIR.get_type(operand)
+    input_shape = size(input_type)
+    out_shape = [
+        input_shape[i]
+        for i in perm
+    ]
+    out_type = MLIRType(eltype(input_type), out_shape)
+
+    MLIR.create_operation("stablehlo.transpose", loc;
+        operands=[operand],
+        results=[out_type],
+        attributes=[
+            MLIR.NamedAttribute(
+                "permutation",
+                MLIR.Attribute(collect(Int64.(perm) .- 1)),
+            ),
+        ])
+end
+
+"""
+    _compute_broadcast_dims(::NTuple{N1,Int64}, ::NTuple{N2,Int64})::Vector{Int64}
+
+Returns the dimensions which are broadcasted upon for a given input and broadcast size size.
+
+```julia
+julia> Coil.stablehlo._compute_broadcast_dims((10,), (10,1))
+Int64[1]
+
+julia> Coil.stablehlo._compute_broadcast_dims((1,1,3,1), (12,12,3,1))
+Int64[1,2,3,4]
+```
+"""
+function _compute_broadcast_dims(input_size, broadcast_size)
+    i = 1
+    j = 1
+    broadcast_dimensions = Int64[]
+    while i <= length(input_size) && j <= length(broadcast_size)
+        if input_size[i] == broadcast_size[j]
+            push!(broadcast_dimensions, i)
+            i += 1
+            j += 1
+        elseif broadcast_size[j] == 1
+            j += 1
+        else
+            push!(broadcast_dimensions, i)
+            i += 1
+        end
+    end
+    broadcast_dimensions
+end
+
+function broadcast_in_dim(operand, new_size; loc=Location())
+    type = MLIR.get_type(operand)
+
+    type_size = size(type)
+    broadcast_dimensions = _compute_broadcast_dims(type_size, new_size)
+
+    MLIR.create_operation("stablehlo.broadcast_in_dim", loc;
+        operands=[operand],
+        results=[
+            MLIRType(eltype(type), new_size),
+        ],
+        attributes=[
+            MLIR.NamedAttribute(
+                "broadcast_dimensions",
+                Attribute(broadcast_dimensions .- 1),
+            )
+        ])
+end
+
+function convolution(
+    output_type,
+    operands,
+    padding,
+    rhs_dilation,
+    window_strides; loc=Location()
+)
+    MLIR.create_operation("stablehlo.convolution", loc;
+        attributes=[
+            NamedAttribute("batch_group_count", Attribute(1)),
+            NamedAttribute("dimension_numbers", parse(
+                Attribute,
+                """
+                #stablehlo.conv<raw
+                  input_batch_dimension = 3,
+                  input_feature_dimension = 2,
+                  input_spatial_dimensions = [0, 1],
+                  kernel_output_feature_dimension = 3,
+                  kernel_input_feature_dimension = 2,
+                  kernel_spatial_dimensions = [0, 1],
+                  output_batch_dimension = 3,
+                  output_feature_dimension = 2,
+                  output_spatial_dimensions = [0, 1],
+                >
+                """
+            )),
+            NamedAttribute("feature_group_count", Attribute(1)),
+            NamedAttribute("padding", Attribute(padding)),
+            NamedAttribute("rhs_dilation", Attribute(rhs_dilation)),
+            NamedAttribute("lhs_dilation", Attribute(ones(Int64, length(rhs_dilation)))),
+            NamedAttribute("window_strides", Attribute(window_strides)),
+            # NamedAttribute("feature_group_count", Attribute(1)),
+            # NamedAttribute("padding", Attribute(fill(2, 2, 2))),
+            # NamedAttribute("rhs_dilation", Attribute()),
+            # NamedAttribute("window_strides", Attribute([4, 4])),
+        ],
+        results=[output_type],
+        operands)
+end
+
+function reverse(operand, dims; loc=Location())
+    MLIR.create_operation("stablehlo.reverse", loc;
+        operands=MLIR.Value[operand],
+        attributes=[
+            NamedAttribute("dimensions", Attribute(collect(dims .- 1))),
+        ],
+        results=[MLIR.get_type(operand)])
+end
+
+end # module stablehlo

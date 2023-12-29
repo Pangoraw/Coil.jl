@@ -1360,6 +1360,7 @@ const iree_hal_encoding_type_t = UInt32
 
 const iree_hal_dim_t = iree_device_size_t
 
+mutable struct iree_hal_buffer_t end
 mutable struct iree_hal_buffer_view_t end
 
 function iree_hal_buffer_view_retain(buffer_view)
@@ -1432,6 +1433,14 @@ end
 
 function iree_hal_buffer_compute_view_range(shape_rank, shape, element_type, encoding_type, indices_count, start_indices, lengths_count, lengths, out_start_offset, out_length)
     ccall((:iree_hal_buffer_compute_view_range, libiree), iree_status_t, (iree_host_size_t, Ptr{iree_hal_dim_t}, iree_hal_element_type_t, iree_hal_encoding_type_t, iree_host_size_t, Ptr{iree_hal_dim_t}, iree_host_size_t, Ptr{iree_hal_dim_t}, Ptr{iree_device_size_t}, Ptr{iree_device_size_t}), shape_rank, shape, element_type, encoding_type, indices_count, start_indices, lengths_count, lengths, out_start_offset, out_length)
+end
+
+function iree_hal_allocator_allocate_buffer(allocator, buffer_params, numel, out_buffer)
+    ccall((:iree_hal_allocator_allocate_buffer, libiree), iree_status_t, (Ptr{iree_hal_allocator_t}, iree_hal_buffer_params_t, iree_host_size_t, Ptr{Ptr{iree_hal_buffer_t}}), allocator, buffer_params, numel, out_buffer)
+end
+
+function iree_hal_buffer_view_create(buffer, shape_rank, shape, element_type, encoding_type, allocator, buffer_view)
+    ccall((:iree_hal_buffer_view_create, libiree), iree_status_t, (Ptr{iree_hal_buffer_t}, iree_host_size_t, Ptr{iree_hal_dim_t}, iree_hal_element_type_t, iree_hal_encoding_type_t, iree_allocator_t, Ptr{Ptr{iree_hal_buffer_view_t}}), buffer, shape_rank, shape, element_type, encoding_type, allocator, buffer_view)
 end
 
 function iree_hal_buffer_view_allocate_buffer(allocator, shape_rank, shape, element_type, encoding_type, buffer_params, initial_data, out_buffer_view)
@@ -2056,6 +2065,10 @@ end
 
 function iree_hal_device_id(device)
     ccall((:iree_hal_device_id, libiree), iree_string_view_t, (Ptr{iree_hal_device_t},), device)
+end
+
+function iree_hal_buffer_map_write(target_buffer, target_offset, source_buffer, data_length)
+    ccall((:iree_hal_buffer_map_write, libiree), iree_status_t, (Ptr{iree_hal_buffer_t}, iree_device_size_t , Ptr{Cvoid}, iree_device_size_t), target_buffer, target_offset, source_buffer, data_length)
 end
 
 function iree_hal_device_host_allocator(device)

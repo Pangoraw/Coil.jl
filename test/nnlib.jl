@@ -5,8 +5,8 @@ import Coil
 
 @testset "NNlib" begin
     @testset "relu" begin
-        f(x) = NNlib.relu(x)
-        cf = Coil.compile(f; verbose=false)
+        f(x) = x isa AbstractArray ? NNlib.relu.(x) : NNlib.relu(x)
+        cf = Coil.compile(f; verbose=false, allow_scalar_args=true)
 
         @test f(1) == cf(1)
         @test f(-1) == cf(-1)

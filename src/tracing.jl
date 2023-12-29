@@ -53,7 +53,7 @@ module {
     %2 = mhlo.add %0, %1 : tensor<6x1xf32>
     %3 = tensor.empty() : tensor<6x1xf32>
     %cst = arith.constant dense<0.000000e+00> : tensor<6x1xf32>
-    %3 = arith.maxf %2, %cst : tensor<6x1xf32>
+    %3 = arith.maximumf %2, %cst : tensor<6x1xf32>
     return %3 : tensor<6x1xf32>
   }
 }
@@ -72,13 +72,15 @@ using ..IREE: Call
 using ..MLIR
 import .MLIR: julia_type, get_result, get_type
 
-import ..func, ..mhlo, ..arith, ..math, ..tensor, ..tosa, ..linalg
+import ..func, ..stablehlo, ..arith, ..math, ..tensor, ..tosa, ..linalg
 import ..Passes
 
-macro loc(ctx)
-    source = QuoteNode(__source__)
+macro loc()
+    source = __source__
+    file = string(source.file)
+    line = source.line
     quote
-        Location($(esc(ctx)), $(source))
+        Location($file, $line, 0)
     end
 end
 
@@ -162,38 +164,38 @@ struct CodegenContext
     allow_scalar_args::Bool
 end
 
-function to_loc(mlir_ctx, line)
+function to_loc(line)
     if line isa String
         NEAR = "near "
         if startswith(line, NEAR)
             line = chopprefix(line, NEAR)
             file, line = split(line, ':')
             line = parse(Int, line)
-            Location(mlir_ctx, String(file), line)
+            Location(String(file), line)
         else
-            Location(mlir_ctx)
+            Location()
         end
     else
-        Location(mlir_ctx, line)
+        Location()
     end
 end
 
-function get_arg_operand!(cg, v; cst_op)
-    (; mlir_ctx, block, tape) = cg
+function get_arg_operand!(cg, v)
+    (; block, tape) = cg
     ctx = tape.c
 
     if !(v isa V)
-        cst = push!(block, cst_op(mlir_ctx, v; loc=@loc(mlir_ctx)))
+        cst = push!(block, make_constant(v; loc=@loc()))
         return MLIR.get_result(cst, 1)
     end
 
     v = bound(tape, v)
     if !haskey(ctx.operands, v)
         operand =
-            MLIR.add_argument!(
+            MLIR.push_argument!(
                 block,
-                MType(mlir_ctx, v.op.val),
-                to_loc(mlir_ctx, v.op.line),
+                MLIRType(v.op.val),
+                to_loc(v.op.line),
             )
         add_arg!(cg, v, operand)
     end
@@ -201,8 +203,8 @@ function get_arg_operand!(cg, v; cst_op)
     ctx.operands[v]
 end
 
-function get_arg_operands!(cg, op, args=op.args; cst_op=mhlo.constant)
-    map(v -> get_arg_operand!(cg, v; cst_op), args)
+function get_arg_operands!(cg, op, args=op.args)
+    map(v -> get_arg_operand!(cg, v), args)
 end
 
 function add_arg!(cg::CodegenContext, val, operand)
@@ -229,12 +231,24 @@ function Base.getproperty(kwcall::KwCall, f::Symbol)
     Base.getproperty(kwcall.call, f)
 end
 
+function make_constant(v; loc=Location())
+    if v isa AbstractArray
+        stablehlo.constant(v)
+    else
+        arith.constant(v)
+    end
+end
+
 function to_vkwargs(tape, arg)
     b = tape[arg]
     T = b.typ
     names = first(T.parameters)
     n = length(names)
-    args = tape[b.args[1]].args
+    args = @static if VERSION >= v"1.10"
+        b.args[2:end]
+    else
+        tape[b.args[1]].args
+    end
     NamedTuple{names,NTuple{n,Any}}(args)
 end
 
@@ -247,13 +261,13 @@ function lower_call!(cg, ::OpConfig{typeof(convert)}, op)
     if !haskey(cg.tape.c.operands, op.args[2])
         return
     end
-    cg.tape.c.operands[V(op)] = get_arg_operand!(cg, op.args[2]; cst_op=arith.constant)
+    cg.tape.c.operands[V(op)] = get_arg_operand!(cg, op.args[2])
 end
 function lower_call!(cg, ::OpConfig{typeof(typeassert)}, op)
     if !haskey(cg.tape.c.operands, op.args[1])
         return
     end
-    cg.tape.c.operands[V(op)] = get_arg_operand!(cg, op.args[1]; cst_op=arith.constant)
+    cg.tape.c.operands[V(op)] = get_arg_operand!(cg, op.args[1])
 end
 function lower_call!(cg, ::OpConfig{typeof(Core.kwcall)}, op::Umlaut.Call{T}) where {T}
     f = value(op.args[2])
@@ -262,22 +276,22 @@ function lower_call!(cg, ::OpConfig{typeof(Core.kwcall)}, op::Umlaut.Call{T}) wh
     lower_call!(cg, OpConfig{typeof(f)}(), KwCall{T}(op, kwargs))
 end
 function lower_call!(cg, ::OpConfig{typeof(NNlib.relu)}, op)
-    (; mlir_ctx, block) = cg
+    (; block) = cg
 
-    operand = get_arg_operand!(cg, only(op.args); cst_op=mhlo.constant)
+    operand = get_arg_operand!(cg, only(op.args))
     type = MLIR.get_type(operand)
-    loc = Location(mlir_ctx, op.line)
+    loc = to_loc(op.line)
 
     T = julia_type(eltype(type))
     cst0 = push!(
         block,
         MLIR.is_tensor(type) ?
-        arith.constant(mlir_ctx, zeros(T), type; loc) :
-        arith.constant(mlir_ctx, zero(T); loc)
+        arith.constant(zeros(T), type; loc) :
+        arith.constant(zero(T); loc)
     )
 
     fop = if T <: AbstractFloat
-        arith.maxf
+        arith.maximumf
     elseif T <: Signed
         arith.maxsi
     elseif T <: Unsigned
@@ -286,7 +300,7 @@ function lower_call!(cg, ::OpConfig{typeof(NNlib.relu)}, op)
         throw("invalid type $T for relu")
     end
 
-    push!(block, fop(mlir_ctx, [
+    push!(block, fop([
             MLIR.get_result(cst0, 1),
             operand,
         ]; loc))
@@ -303,20 +317,20 @@ function lower_call!(cg, config::OpConfig{typeof(getindex)}, op)
         return
     end
 
-    x = get_arg_operand!(cg, first(op.args); cst_op=mhlo.constant)
-    i = get_arg_operand!(cg, last(op.args); cst_op=arith.constant)
+    x = get_arg_operand!(cg, first(op.args))
+    i = get_arg_operand!(cg, last(op.args))
 
     T = julia_type(get_type(i))
     @assert T <: Integer
 
-    cst1 = push!(block, arith.constant(mlir_ctx, one(T)))
-    zerobased0 = push!(block, arith.subi(mlir_ctx, [i, get_result(cst1, 1)]))
-    index0 = push!(block, arith.index_cast(mlir_ctx, get_result(zerobased0, 1); loc=@loc(mlir_ctx)))
+    cst1 = push!(block, arith.constant(one(T)))
+    zerobased0 = push!(block, arith.subi([i, get_result(cst1, 1)]))
+    index0 = push!(block, arith.index_cast(get_result(zerobased0, 1); loc=@loc()))
 
-    push!(block, tensor.extract(mlir_ctx, x, get_result(index0, 1)))
+    push!(block, tensor.extract(x, get_result(index0, 1)))
 end
 function lower_call!(cg, ::OpConfig{typeof(map)}, op)
-    (; mlir_ctx, block) = cg
+    (; block) = cg
 
     fmap = value(op.args[1])
     # fred = value(op.args[2])
@@ -326,7 +340,7 @@ function lower_call!(cg, ::OpConfig{typeof(map)}, op)
         return
     end
 
-    operand = get_arg_operand!(cg, op.args[2]; cst_op=arith.constant)
+    operand = get_arg_operand!(cg, op.args[2])
     type = get_type(operand)
 
     val = first(value(op.args[2]))
@@ -334,19 +348,19 @@ function lower_call!(cg, ::OpConfig{typeof(map)}, op)
     unary_ctx = Context(fmap)
     _, unary_tape = _trace(fmap, val; ctx=unary_ctx)
 
-    inner_block = Block(MType[], Location[])
-    unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose, true)
+    inner_block = Block(MLIRType[], Location[])
+    unary_cg = CodegenContext(cg.mlir_ctx, inner_block, unary_tape, cg.verbose, true)
 
     lower_tape!(unary_cg)
 
-    push!(inner_block, linalg.yield(mlir_ctx, unary_ctx.operands[unary_tape.result]; loc=@loc(mlir_ctx)))
+    push!(inner_block, linalg.yield(unary_ctx.operands[unary_tape.result]; loc=@loc()))
 
-    out0 = push!(block, tensor.empty(mlir_ctx, type; loc=@loc(mlir_ctx)))
-    push!(block, linalg.map(mlir_ctx, inner_block, operand, get_result(out0, 1); loc=Location(mlir_ctx, op.line)))
+    out0 = push!(block, tensor.empty(type; loc=@loc()))
+    push!(block, linalg.map_as_generic(inner_block, operand, get_result(out0, 1); loc=to_loc(op.line)))
 end
 # function lower_call!(cg, ::OpConfig{typeof(zero)}, op)
 #     (; mlir_ctx, block) = cg
-#     push!(block, mhlo.constant(mlir_ctx, op.val; loc=Location(mlir_ctx, op.line)))
+#     push!(block, stablehlo.constant(op.val; loc=Location(mlir_ctx, op.line)))
 # end
 function lower_call!(cg, ::OpConfig{typeof(reduce)}, op)
     op.fn = reduce
@@ -362,7 +376,7 @@ function lower_call!(cg, ::OpConfig{typeof(mapreduce)}, op)
 
     fmapreduce = (a, b) -> fred(fmap(a), b)
 
-    operand = get_arg_operand!(cg, op.args[3]; cst_op=mhlo.constant)
+    operand = get_arg_operand!(cg, op.args[3])
     type = get_type(operand)
 
     dims = op isa KwCall ? get(op.kwargs, :dims, Colon()) : Colon()
@@ -391,61 +405,62 @@ function lower_call!(cg, ::OpConfig{typeof(mapreduce)}, op)
         throw("todo: unsupported dynamic init")
     end
 
-    constant0 = push!(block, arith.constant(mlir_ctx, init; loc=@loc(mlir_ctx)))
+    constant0 = push!(block, arith.constant(init; loc=@loc()))
     init_operand = get_result(constant0, 1)
 
     _, unary_tape = _trace(fmapreduce, valx, vali)
 
-    inner_block = Block(MType[], Location[])
+    inner_block = Block(MLIRType[], Location[])
     unary_cg = CodegenContext(mlir_ctx, inner_block, unary_tape, cg.verbose, true)
 
     lower_tape!(unary_cg)
     unary_ctx = unary_tape.c
 
     push!(inner_block, linalg.yield(
-        mlir_ctx, unary_ctx.operands[unary_tape.result]))
+        unary_ctx.operands[unary_tape.result])
+    )
 
     reduce0 = push!(block, linalg.reduce(
-        mlir_ctx, inner_block,
+        inner_block,
         [operand, init_operand],
-        dims; loc=Location(mlir_ctx, op.line)
+        dims; loc=to_loc(op.line)
     ))
 
     if ndims(get_type(init_operand)) == 0
-        index0 = push!(block, arith.constant(mlir_ctx, 0, MLIR.IndexType(mlir_ctx); loc=@loc(mlir_ctx)))
-        reshape0 = push!(block, mhlo.reshape(mlir_ctx, get_result(reduce0, 1), (1,); loc=@loc(mlir_ctx)))
-        push!(block, tensor.extract(mlir_ctx, get_result(reshape0, 1), get_result(index0, 1); loc=@loc(mlir_ctx)))
+        index0 = push!(block, arith.constant(0, MLIR.IndexType(); loc=@loc()))
+        reshape0 = push!(block, stablehlo.reshape(get_result(reduce0, 1), (1,); loc=@loc()))
+        push!(block, tensor.extract(get_result(reshape0, 1), get_result(index0, 1); loc=@loc()))
     else
         shape_with_dims = [i in dims ? 1 : size(type, i) for i in 1:ndims(type)]
-        push!(block, mhlo.reshape(mlir_ctx, get_result(reduce0, 1), shape_with_dims; loc=@loc(mlir_ctx)))
+        push!(block, stablehlo.reshape(get_result(reduce0, 1), shape_with_dims; loc=@loc()))
     end
 end
 
 function lower_call!(cg, ::OpConfig{typeof(NNlib.meanpool)}, op)
     (; mlir_ctx, block) = cg
-    reduced = get_result(lower_reduce_window!(cg, mhlo.add, op))
+    reduced = get_result(lower_reduce_window!(cg, stablehlo.add, op))
     output_type = get_type(reduced)
 
-    inW, inH, _, _ = size(get_type(get_arg_operand!(cg, op.args[1]; cst_op=nothing)))
+    inW, inH, _, _ = size(get_type(get_arg_operand!(cg, op.args[1])))
     outW, outH, _, _ = output_size = size(output_type)
 
     win_W = inW ÷ outW
     win_H = inH ÷ outH
     factor = win_W * win_H
 
-    cst = get_result(push!(block, arith.constant(mlir_ctx, fill(julia_type(eltype(output_type))(factor)); loc=Location(mlir_ctx, op.line))))
-    cst = get_result(push!(block, mhlo.broadcast_in_dim(mlir_ctx, cst, output_size; loc=Location(mlir_ctx, op.line))))
-    push!(block, mhlo.divide(mlir_ctx, [reduced, cst]; loc=Location(mlir_ctx, op.line)))
+    cst = get_result(push!(block, arith.constant(fill(julia_type(eltype(output_type))(factor)); loc=to_loc(op.line))))
+    cst = get_result(push!(block, stablehlo.broadcast_in_dim(cst, output_size; loc=to_loc(op.line))))
+    push!(block, stablehlo.divide([reduced, cst]; loc=to_loc(op.line)))
 end
 function lower_call!(cg, ::OpConfig{typeof(NNlib.maxpool)}, op)
-    lower_reduce_window!(cg, mhlo.maximum, op)
+    lower_reduce_window!(cg, stablehlo.maximum, op)
 end
 
 function lower_reduce_window!(cg, reduce_op, op)
     (; mlir_ctx, block) = cg
 
     operand, dims = op.args
-    operand = get_arg_operand!(cg, operand; cst_op=arith.constant)
+    operand = get_arg_operand!(cg, operand)
     dims = value(dims)
 
     @assert dims isa NNlib.PoolDims "unsupported NNlib.maxpool call"
@@ -461,34 +476,34 @@ function lower_reduce_window!(cg, reduce_op, op)
     W, H, C, B = size(input_type)
     T = eltype(input_type)
 
-    window_dimensions = [dims.kernel_size..., 1, 1]
-    window_strides = [dims.stride..., 1, 1]
+    window_dimensions = [NNlib.kernel_size(dims)..., 1, 1]
+    window_strides = [NNlib.stride(dims)..., 1, 1]
     base_dilations = [1, 1, 1, 1]
-    window_dilations = [dims.dilation..., 1, 1]
-    padding = [dims.padding..., 0, 0][begin:4]
+    window_dilations = [NNlib.dilation(dims)..., 1, 1]
+    padding = [NNlib.padding(dims)..., 0, 0][begin:4]
     padding = repeat(padding; inner=(1, 2))
 
-    kw, kh = dims.kernel_size
-    pw, ph, _, _ = dims.padding
-    dw, dh = dims.dilation
-    sw, sh = dims.stride
+    kw, kh = NNlib.kernel_size(dims)
+    pw, ph, _, _ = NNlib.padding(dims)
+    dw, dh = NNlib.dilation(dims)
+    sw, sh = NNlib.stride(dims)
     h_out = (H + 2 * ph - dh * (kh - 1) - 1) ÷ sh + 1
     w_out = (W + 2 * pw - dw * (kw - 1) - 1) ÷ sw + 1
 
     output_size = (w_out, h_out, C, B)
-    output_type = MType(mlir_ctx, T, output_size)
+    output_type = MLIRType(T, output_size)
 
     inner_block = let
-        unranked_tensor_type = MType(mlir_ctx, T, ())
+        unranked_tensor_type = MLIRType(T, ())
         inner_block = MLIR.Block(
             [unranked_tensor_type, unranked_tensor_type],
             [Location(mlir_ctx, op.line), Location(mlir_ctx, op.line)],
         )
         val = MLIR.get_argument(inner_block, 1)
         init = MLIR.get_argument(inner_block, 2)
-        maxop = push!(inner_block, reduce_op(mlir_ctx, [val, init]; loc=@loc(mlir_ctx)))
+        maxop = push!(inner_block, reduce_op(mlir_ctx, [val, init]; loc=@loc()))
         out = get_result(maxop, 1)
-        push!(inner_block, mhlo.return_(mlir_ctx, out; loc=@loc(mlir_ctx)))
+        push!(inner_block, stablehlo.return_(mlir_ctx, out; loc=@loc()))
         inner_block
     end
     region = MLIR.Region()
@@ -497,14 +512,13 @@ function lower_reduce_window!(cg, reduce_op, op)
     initop = push!(block, arith.constant(
         mlir_ctx,
         zeros(MLIR.julia_type(T),);
-        loc=@loc(mlir_ctx)
+        loc=@loc()
     ))
 
     init_values = get_result(initop, 1)
     operands = [operand, init_values]
 
-    push!(block, mhlo.reduce_window(
-        mlir_ctx,
+    push!(block, stablehlo.reduce_window(
         operands, region,
         window_dimensions,
         window_strides,
@@ -512,7 +526,7 @@ function lower_reduce_window!(cg, reduce_op, op)
         window_dilations,
         padding,
         output_type;
-        loc=Location(mlir_ctx, op.line)
+        loc=to_loc(op.line)
     ))
 end
 function lower_call!(cg, ::OpConfig{typeof(NNlib.conv)}, op)
@@ -532,16 +546,16 @@ function lower_call!(cg, ::OpConfig{typeof(NNlib.conv)}, op)
     cdims = value(op.args[end])
     @assert cdims isa NNlib.DenseConvDims "lowering NNlib.conv: unsupported convolution type $(typeof(cdims))"
 
-    kw, kh = cdims.kernel_size
-    pw, ph, _, _ = cdims.padding
-    dw, dh = cdims.dilation
-    sw, sh = cdims.stride
+    kw, kh = NNlib.kernel_size(cdims)
+    pw, ph, _, _ = NNlib.padding(cdims)
+    dw, dh = NNlib.dilation(cdims)
+    sw, sh = NNlib.stride(cdims)
 
     h_out = (H + 2 * ph - dh * (kh - 1) - 1) ÷ sh + 1
     w_out = (W + 2 * pw - dw * (kw - 1) - 1) ÷ sw + 1
     c_out = size(weight_type, 4)
     output_size = (w_out, h_out, c_out, B)
-    output_type = MType(mlir_ctx, eltype(input_type), output_size)
+    output_type = MLIRType(eltype(input_type), output_size)
 
     padding = Int64[
         pw pw
@@ -550,27 +564,25 @@ function lower_call!(cg, ::OpConfig{typeof(NNlib.conv)}, op)
     dilation = Int64[dw, dh]
     strides = Int64[sw, sh]
 
-    if !cdims.flipkernel
+    if !NNlib.flipkernel(cdims)
         reverse_op = push!(block,
-            mhlo.reverse(
-                mlir_ctx,
+            stablehlo.reverse(
                 wop,
                 [1, 2];
-                loc=Location(mlir_ctx, op.line),
+                loc=to_loc(op.line)
             )
         )
         wop = get_result(reverse_op)
     end
 
     conv0 = push!(block,
-        mhlo.convolution(
-            mlir_ctx,
+        stablehlo.convolution(
             output_type,
             [xop, wop],
             padding,
             dilation,
             strides;
-            loc=Location(mlir_ctx, op.line)
+            loc=to_loc(op.line)
         ),
     )
     ctx.operands[V(op)] = get_result(conv0, 1)
@@ -582,7 +594,7 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.materialize)}, op)
         @debug "skipping materialization of broadcast"
         return
     end
-    ctx.operands[V(op)] = get_arg_operand!(cg, first(op.args); cst_op=mhlo.constant)
+    ctx.operands[V(op)] = get_arg_operand!(cg, first(op.args))
     nothing
 end
 function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
@@ -598,16 +610,16 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
     if length(op.args) == 2
         func_arg = first(op.args)
         f = func_arg isa Variable ? tape[func_arg].val : func_arg
-        operand = get_arg_operand!(cg, last(op.args); cst_op=mhlo.constant)
+        operand = get_arg_operand!(cg, last(op.args))
 
         if f == identity
             ctx.operands[V(op)] = operand
         elseif f == NNlib.relu
             type = get_type(operand)
             T = julia_type(eltype(type))
-            cst0 = push!(block, arith.constant(mlir_ctx, zeros(T), type; loc=Location(mlir_ctx, op.line)))
+            cst0 = push!(block, arith.constant(zeros(T), type; loc=to_loc(op.line)))
             mop = if T <: AbstractFloat
-                arith.maxf
+                arith.maximumf
             elseif T <: Unsigned
                 arith.maxui
             elseif T <: Signed
@@ -615,12 +627,12 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
             else
                 throw("cannot compute max on element of type $T")
             end
-            max0 = push!(block, mop(mlir_ctx, [operand, get_result(cst0, 1)]; loc=Location(mlir_ctx, op.line)))
+            max0 = push!(block, mop([operand, get_result(cst0, 1)]; loc=to_loc(op.line)))
             ctx.operands[V(op)] = MLIR.get_result(max0, 1)
         elseif f ∈ math_unary_functions
             fname = nameof(f)
             fop = getproperty(math, fname)
-            mop = fop(mlir_ctx, operand; loc=Location(mlir_ctx, op.line))
+            mop = fop(operand; loc=to_loc(op.line))
             push!(block, mop)
             ctx.operands[V(op)] = MLIR.get_result(mop, 1)
         else
@@ -628,7 +640,7 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
             T = julia_type(eltype(type))
             val = zero(T) # use a placeholder arg
 
-            inner_block = Block(MType[], Location[])
+            inner_block = Block(MLIRType[], Location[])
 
             unary_ctx = Context(f)
             _, unary_tape = _trace(f, val; ctx=unary_ctx)
@@ -637,14 +649,13 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
             lower_tape!(unary_cg)
 
             ret_operand = unary_ctx.operands[unary_tape.result]
-            push!(inner_block, linalg.yield(mlir_ctx, ret_operand; loc=@loc(mlir_ctx)))
+            push!(inner_block, linalg.yield(ret_operand; loc=@loc()))
 
-            empty0 = push!(block, tensor.empty(mlir_ctx, type; loc=@loc(mlir_ctx)))
-            mapping = push!(block, linalg.map(
-                mlir_ctx,
+            empty0 = push!(block, tensor.empty(type; loc=@loc()))
+            mapping = push!(block, linalg.map_as_generic(
                 inner_block,
                 operand, MLIR.get_result(empty0, 1);
-                loc=Location(mlir_ctx, op.line)
+                loc=to_loc(op.line),
             ))
 
             ctx.operands[V(op)] = MLIR.get_result(mapping, 1)
@@ -668,12 +679,19 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
         type = MLIR.get_type(operand)
         shape = size(type)
 
+        if !MLIR.is_tensor(type)
+            tt = MLIRType(type, shape)
+            t = push!(block, tensor.empty(tt; loc=@loc()))
+            t_op = push!(block, tensor.insert(operand, MLIR.get_result(t, 1); loc=@loc()))
+            operand = MLIR.get_result(t_op, 1)
+        end
+
         if julia_type(eltype(type)) != out_element_type && out_element_type <: AbstractFloat
             sitofp0 = push!(block,
                 arith.sitofp(
-                    mlir_ctx, operand,
-                    MType(mlir_ctx, MType(mlir_ctx, out_element_type), shape);
-                    loc=@loc(mlir_ctx)
+                    operand,
+                    MLIRType(MLIRType(out_element_type), shape);
+                    loc=@loc()
                 )
             )
             operand = MLIR.get_result(sitofp0, 1)
@@ -682,9 +700,9 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
         if shape != out_shape
             reshape_op = push!(
                 block,
-                mhlo.broadcast_in_dim(
-                    mlir_ctx, operand, out_shape;
-                    loc=Location(mlir_ctx, op.line)
+                stablehlo.broadcast_in_dim(
+                    operand, out_shape;
+                    loc=to_loc(op.line)
                 ),
             )
             operand = MLIR.get_result(reshape_op, 1)
@@ -707,14 +725,14 @@ function lower_call!(cg, ::OpConfig{typeof(Base.Broadcast.broadcasted)}, op)
         throw("unsupported broadcast function $(f)")
     end
 
-    out_type = MType(mlir_ctx, MType(mlir_ctx, out_element_type), out_shape,)
-    fop = getproperty(mhlo, op_type)
+    out_type = MLIRType(MLIRType(out_element_type), out_shape,)
+    fop = getproperty(stablehlo, op_type)
 
-    push!(block, fop(mlir_ctx, operands, out_type; loc=Location(mlir_ctx, op.line)))
+    push!(block, fop(operands; loc=to_loc(op.line)))
 end
 
 function lower_call!(cg, ::OpConfig{typeof(fma)}, op)
-    (; block, tape, mlir_ctx) = cg
+    (; block, tape) = cg
     ctx = tape.c
 
     if !cg.allow_scalar_args && all(arg -> !is_tensor(tape, arg), op.args)
@@ -722,25 +740,25 @@ function lower_call!(cg, ::OpConfig{typeof(fma)}, op)
     end
 
     (a, b, c) = get_arg_operands!(cg, op)
-    mul0 = push!(block, gen_arith!(cg, *, [a, b]; loc=Location(mlir_ctx, op.line)))
-    add0 = push!(block, gen_arith!(cg, +, [MLIR.get_result(mul0, 1), c]; loc=Location(mlir_ctx, op.line)))
+    mul0 = push!(block, gen_arith!(cg, *, [a, b]; loc=to_loc(op.line)))
+    add0 = push!(block, gen_arith!(cg, +, [MLIR.get_result(mul0, 1), c]; loc=to_loc(op.line)))
 
     ctx.operands[V(op)] = MLIR.get_result(add0, 1)
 
     # ctx.operands[V(op)] = MLIR.get_result(
-    #     push!(block, math.fma(mlir_ctx, operands; loc=Location(mlir_ctx, op.line))),
+    #     push!(block, math.fma(operands; loc=to_loc(op.line))),
     #     1,
     # )
 end
 
 function lower_unary!(cg, op, f)
-    (; mlir_ctx, block, tape) = cg
+    (; block, tape) = cg
     ctx = tape.c
 
     fname = nameof(f)
     fop = getproperty(math, fname)
-    operand = get_arg_operand!(cg, first(op.args); cst_op=arith.constant)
-    mop = fop(mlir_ctx, operand; loc=Location(mlir_ctx, op.line))
+    operand = get_arg_operand!(cg, first(op.args))
+    mop = fop(operand; loc=to_loc(op.line))
     push!(block, mop)
 
     ctx.operands[V(op)] = MLIR.get_result(mop, 1)
@@ -754,7 +772,7 @@ for f in math_unary_functions
 end
 
 function lower_arith!(cg, op)
-    (; mlir_ctx, block, tape) = cg
+    (; block, tape) = cg
 
     if !cg.allow_scalar_args && all(arg -> !is_tensor(tape, arg), op.args)
         return
@@ -762,22 +780,22 @@ function lower_arith!(cg, op)
 
     f = value(op.fn)
 
-    operands = get_arg_operands!(cg, op; cst_op=arith.constant)
-    push!(block, gen_arith!(cg, f, operands; loc=Location(mlir_ctx, op.line)))
+    operands = get_arg_operands!(cg, op)
+    push!(block, gen_arith!(cg, f, operands; loc= isnothing(op.line) ? Location() : to_loc(op.line)))
 end
 
-function _convertto!(mlir_ctx, block, a, Ta, T)
+function _convertto!(block, a, Ta, T)
     if Ta <: Integer && T <: AbstractFloat
-        a = get_result(push!(block, arith.sitofp(mlir_ctx, a, MType(mlir_ctx, T); loc=@loc(mlir_ctx))), 1)
+        a = get_result(push!(block, arith.sitofp(a, MLIRType(T); loc=@loc())), 1)
     elseif Ta <: AbstractFloat && T <: AbstractFloat && sizeof(Ta) < sizeof(T)
-        a = get_result(push!(block, arith.extf(mlir_ctx, a, MType(mlir_ctx, T); loc=@loc(mlir_ctx))), 1)
+        a = get_result(push!(block, arith.extf(a, MLIRType(T); loc=@loc())), 1)
     else
         a
     end
 end
 
-function gen_arith!(cg, f, operands; loc=Location(cg.mlir_ctx))
-    (; mlir_ctx, block) = cg
+function gen_arith!(cg, f, operands; loc=Location())
+    (; block) = cg
 
     if length(operands) > 2
         fop = gen_arith!(cg, f, operands[begin:begin+1]; loc)
@@ -793,7 +811,7 @@ function gen_arith!(cg, f, operands; loc=Location(cg.mlir_ctx))
     if is_integer && f == /
         # cast operands to floats
         operands = map(operands) do operand
-            sitofp0 = push!(block, arith.sitofp(mlir_ctx, operand; loc=@loc(mlir_ctx)))
+            sitofp0 = push!(block, arith.sitofp(operand; loc=@loc()))
             MLIR.get_result(sitofp0, 1)
         end
         is_integer = false
@@ -804,8 +822,8 @@ function gen_arith!(cg, f, operands; loc=Location(cg.mlir_ctx))
     Tb = julia_type(eltype(get_type(b)))
     T = Base.promote_type(Ta, Tb)
 
-    a = _convertto!(mlir_ctx, block, a, Ta, T)
-    b = _convertto!(mlir_ctx, block, b, Tb, T)
+    a = _convertto!(block, a, Ta, T)
+    b = _convertto!(block, b, Tb, T)
 
     names = Dict{Function,Symbol}([
         (+) => :add,
@@ -818,7 +836,7 @@ function gen_arith!(cg, f, operands; loc=Location(cg.mlir_ctx))
 
     fname = Symbol(names[f], t)
     fop = getproperty(arith, fname)
-    fop(mlir_ctx, [a, b]; loc)
+    fop([a, b]; loc)
 end
 
 for f in (+, -, /)
@@ -831,7 +849,7 @@ function lower_call!(cg, ::OpConfig{typeof(Base.add_sum)}, op)
 end
 
 function lower_call!(cg, ::OpConfig{typeof(*)}, op)
-    (; mlir_ctx, block, tape) = cg
+    (; block, tape) = cg
 
     if all(arg -> !is_tensor(tape, arg), op.args)
         return lower_arith!(cg, op)
@@ -839,21 +857,19 @@ function lower_call!(cg, ::OpConfig{typeof(*)}, op)
 
     operands = get_arg_operands!(cg, op)
 
-    state = OperationState("mhlo.dot", Location(mlir_ctx, op.line))
-    MLIR.add_operands!(state, operands)
+    result_type = MLIRType(op.val)
+    op = MLIR.create_operation("stablehlo.dot", to_loc(op.line); operands,
+        results=[
+            result_type,
+        ])
 
-    result_type = MType(mlir_ctx, op.val)
-    MLIR.add_results!(state, [
-        result_type,
-    ])
-
-    push!(block, Operation(state))
+    push!(block, op)
 end
 
 function lower_call!(cg, ::OpConfig{typeof(reshape)}, op)
-    (; mlir_ctx, block) = cg
+    (; block) = cg
 
-    operand = get_arg_operand!(cg, first(op.args); cst_op=mhlo.constant)
+    operand = get_arg_operand!(cg, first(op.args))
 
     current_size = size(MLIR.get_type(operand))
     out_size = value.(@view op.args[begin+1:end]) # const prod reshape sizes
@@ -867,7 +883,7 @@ function lower_call!(cg, ::OpConfig{typeof(reshape)}, op)
     rev_perm = length(out_size):-1:1
 
     # https://www.tensorflow.org/mlir/hlo_ops#mhloreshape_mlirmhloreshapeop
-    # the semantics of the mhlo.reshape op means that we need to convert to
+    # the semantics of the stable.reshape op means that we need to convert to
     # row major before resizing so that the right element order is used.
     # see https://www.tensorflow.org/xla/operation_semantics#reshape
     # for more information
@@ -876,9 +892,9 @@ function lower_call!(cg, ::OpConfig{typeof(reshape)}, op)
         perm = length(current_size):-1:1
         transpose_op = push!(
             block,
-            mhlo.transpose(
-                mlir_ctx, operand, perm;
-                loc=Location(mlir_ctx, op.line)
+            stablehlo.transpose(
+                operand, perm;
+                loc=to_loc(op.line)
             ),
         )
         get_result(transpose_op, 1)
@@ -887,18 +903,18 @@ function lower_call!(cg, ::OpConfig{typeof(reshape)}, op)
     end
     reshape_op = push!(
         block,
-        mhlo.reshape(
-            mlir_ctx, operand,
+        stablehlo.reshape(
+            operand,
             reverse(out_size);
-            loc=Location(mlir_ctx, op.line)
+            loc=to_loc(op.line)
         ),
     )
     if length(out_size) > 1
         push!(
             block,
-            mhlo.transpose(
-                mlir_ctx, get_result(reshape_op, 1), rev_perm;
-                loc=Location(mlir_ctx, op.line)
+            stablehlo.transpose(
+                get_result(reshape_op, 1), rev_perm;
+                loc=to_loc(op.line)
             )
         )
     else
@@ -935,22 +951,15 @@ function compile_to_module(tape, args...; verbose, allow_scalar_args)
     typeof_args = args = map(Core.Typeof, args)
     m = which(ctx.f, typeof_args)
 
-    mlir_ctx = MLIR.Context()
-    IREE.register_all_dialects!(mlir_ctx)
-    for dialect in ("builtin", "func", "mhlo", "arith", "math", "tosa", "linalg", "tensor", "cf")
-        MLIR.get_or_load_dialect(mlir_ctx, dialect)
-    end
-
-    location = Location(mlir_ctx, string(m.file), m.line)
-    mlir_module = MModule(mlir_ctx, location)
+    location = Location(string(m.file), m.line, 0)
+    mlir_module = MModule(location)
     mlir_module_body = MLIR.get_body(mlir_module)
-    mlir_func_state = OperationState("func.func", location)
 
-    block = Block(MType[], Location[])
+    block = Block(MLIRType[], Location[])
 
     # allow_scalar_args = any(arg -> arg.op.typ <: Real, inputs(tape))
 
-    cg_context = CodegenContext(mlir_ctx, block, tape, verbose, allow_scalar_args)
+    cg_context = CodegenContext(MLIR.context(), block, tape, verbose, allow_scalar_args)
     lower_tape!(cg_context)
 
     if !haskey(ctx.operands, bound(tape, tape.result))
@@ -968,29 +977,32 @@ function compile_to_module(tape, args...; verbose, allow_scalar_args)
         MLIR.get_type(ctx.operands[bound(tape, arg)])
         for arg in ctx.block_args
     ]
-    ftype = MType(mlir_ctx, input_types => result_types)
+    ftype = MLIRType(input_types => result_types)
 
-    MLIR.add_attributes!(mlir_func_state, [
-        NamedAttribute(mlir_ctx, "sym_name", MLIR.Attribute(mlir_ctx, string(func_name))),
-        NamedAttribute(mlir_ctx, "function_type", MLIR.Attribute(ftype)),
-    ])
+    push!(block, func.return_([result_operand]))
 
     region = Region()
     push!(region, block)
-    MLIR.add_owned_regions!(mlir_func_state, [region])
+    mlir_func_op = MLIR.create_operation("func.func", location; results=[],
+                                        owned_regions=[region],
+                                        attributes=[
+        MLIR.NamedAttribute("sym_name", MLIR.Attribute(string(func_name))),
+        MLIR.NamedAttribute("function_type", MLIR.Attribute(ftype)),
+    ])
 
-    push!(block, func.return_(mlir_ctx,
-        [result_operand]
-    ))
+    push!(mlir_module_body, mlir_func_op)
 
-    funcop = Operation(mlir_func_state)
-    push!(mlir_module_body, funcop)
-
-    verbose && show(IOContext(stdout, :debug => true), funcop)
+    verbose && show(IOContext(stdout, :debug => true), mlir_func_op)
 
     MLIR.verifyall(mlir_module)
 
     return mlir_module
+end
+
+function with_compiler_session(f, sess)
+    mlir_ctx = IREE.borrow_context(sess)
+    IREE.register_all_dialects!(mlir_ctx)
+    MLIR.context!(f, mlir_ctx)
 end
 
 function compile_tape(
@@ -998,23 +1010,29 @@ function compile_tape(
     verbose=haskey(ENV, "COIL_VERBOSE"),
     device,
     hal_target,
-    allow_scalar_args,
+    allow_scalar_args
 )
     ctx = tape.c
     func_name = ctx.f isa Function ? nameof(ctx.f) : nameof(typeof(ctx.f))
 
-    mlir_module = compile_to_module(tape, args...; verbose, allow_scalar_args)
+    sess = IREE.CompilerSession()
+    graph_call = with_compiler_session(sess) do
+        mlir_module = compile_to_module(tape, args...; verbose, allow_scalar_args)
 
-    # Apply row-major -> col-major passes
+        # Apply row-major -> col-major passes
 
-    @debug "running passes"
-    MLIR.run(Passes.TransposeArgsToRowMajorPass(), mlir_module)
-    MLIR.run(Passes.TransposeReturnTypePass(), mlir_module)
-    @debug "done running passes"
+        @debug "running passes"
+        MLIR.run!(Passes.TransposeArgsToRowMajorPass(), mlir_module)
+        MLIR.run!(Passes.TransposeReturnTypePass(), mlir_module)
+        @debug "done running passes"
+
+        get_call(sess, mlir_module,
+                 string("module.", func_name),
+                 device, hal_target)
+    end
 
     ###
 
-    graph_call = get_call(mlir_module, string("module.", func_name), device, hal_target)
 
     result_op = tape[tape.result]
     graph_call_op = Umlaut.mkcall(graph_call, ctx.block_args...; val=result_op.val)
@@ -1193,7 +1211,12 @@ macro code_mlir(call)
             args = $(esc(Expr(:vect, call.args[begin+1:end]...)))
             ctx = Context(f)
             _, tape = _trace(f, args...; ctx)
-            compile_to_module(tape, args...; verbose=false)
+            sess = IREE.CompilerSession()
+            with_compiler_session(sess) do
+                compile_to_module(tape, args...;
+                                  verbose=false,
+                                  allow_scalar_args=true)
+            end, sess
         end
     end
 end
@@ -1202,7 +1225,7 @@ end
     @code_linalg f(args...)
 
 Similar to `@code_mlir` but with with the dialect translation option
-enabled "iree-mhlo-to-linalg-on-tensors".
+enabled "iree-stablehlo-to-linalg-on-tensors".
 """
 macro code_linalg(call)
     Meta.isexpr(call, :call) || throw("expected call Expr")
@@ -1212,27 +1235,40 @@ macro code_linalg(call)
             args = $(esc(Expr(:vect, call.args[begin+1:end]...)))
             ctx = Context(f)
             _, tape = _trace(f, args...; ctx)
-            module_ = compile_to_module(tape, args...; verbose=false)
-            lower_to_linalg!(module_)
+            sess = IREE.CompilerSession()
+            module_ = with_compiler_session(
+                () -> compile_to_module(tape, args...; verbose=false, allow_scalar_args=true),
+                sess,
+            )
+            lower_to_linalg!(sess, module_)
         end
     end
 end
 
-function run_pipeline!(module_, pipeline)
-    IREE.register_all_dialects!(module_.context)
+using .IREE: Compiler
 
-    pm = MLIR.PassManager(module_.context)
-    MLIR.enable_verifier!(pm)
+function run_pipeline!(sess, module_, pipeline)
+    invocation = Compiler.ireeCompilerInvocationCreate(sess)
 
-    op_pass = MLIR.OpPassManager(pm)
-    MLIR.add_pipeline!(op_pass, pipeline)
+    try
+        success = Compiler.ireeCompilerInvocationImportBorrowModule(
+            invocation,
+            MLIR.get_operation(module_),
+        )
+        success || error("failed to import module") 
 
-    MLIR.run(pm, module_)
+        success = Compiler.ireeCompilerInvocationRunPassPipeline(invocation, pipeline)
+        success || error("failed to run pass pipeline \"$pipeline\"")
+
+    finally
+        Compiler.ireeCompilerInvocationDestroy(invocation)
+    end
+
     module_
 end
 
-function lower_to_linalg!(module_)
-    run_pipeline!(module_, "iree-mhlo-to-linalg-on-tensors")
+function lower_to_linalg!(sess, module_)
+    run_pipeline!(sess, module_, "iree-stablehlo-to-linalg")
 end
 
 with_debug(val) = with_debug(stdout, val)
@@ -1240,26 +1276,26 @@ with_debug(io::IO, val) = show(IOContext(io, :debug => true), val)
 
 ### Compile utils
 
-function compile_to_bytecode(module_; input_type=MLIR.get_input_type(module_), hal_target="llvm-cpu")
+function compile_to_bytecode(sess, module_; input_type=MLIR.get_input_type(module_), hal_target="llvm-cpu")
     input_type ∈ (
         :none,
-        :mhlo,
+        :stablehlo,
         :xla,
         :tm_tensor,
         :tosa,
     ) || throw("invalid iree input type ($input_type)")
 
-    pm = MLIR.PassManager(module_.context)
-    op_pass = MLIR.OpPassManager(pm)
-    options = IREE.CompilerOptions([
+    # pm = MLIR.PassManager(module_.context)
+    # op_pass = MLIR.OpPassManager(pm)
+    options = [
         "--iree-hal-target-backends=$hal_target",
         "--iree-input-type=$input_type",
-    ])
+    ]
 
-    IREE.build_vm_pass_pipeline!(op_pass, options)
+    # IREE.build_vm_pass_pipeline!(op_pass, options)
+    # MLIR.run!(pm, module_)
 
-    MLIR.run(pm, module_)
-    return IREE.translate_module_to_vm_bytecode(module_, options)
+    return IREE.translate_module_to_vm_bytecode(sess, module_, options)
 end
 
 function get_session(driver="local-task")
@@ -1270,7 +1306,7 @@ function get_session(driver="local-task")
     IREE.Session(instance, session_options, device)
 end
 
-function get_call(module_, name, device, hal_target)
+function get_call(compiler_session, module_, name, device, hal_target)
     mod_op = MLIR.get_operation(module_)
     block = MLIR.get_first_block(mod_op)
 
@@ -1279,22 +1315,22 @@ function get_call(module_, name, device, hal_target)
     args_transposed = false
     return_transposed = false
     for op in MLIR.OperationIterator(block)
-        if MLIR.get_name(op) == "func.func"
+        if MLIR.name(op) == "func.func"
             funcname = MLIR.get_attribute_by_name(op, "sym_name")
-            if isnothing(funcname) || MLIR.get_string_value(funcname) != realname
+            if isnothing(funcname) || MLIR.string_value(funcname) != realname
                 continue
             end
 
             args_transposed_attr = MLIR.get_attribute_by_name(op, Passes.COIL_ARGS_TRANSPOSED_ATTR_NAME)
-            args_transposed = !isnothing(args_transposed_attr) && MLIR.get_bool_value(args_transposed_attr)
+            args_transposed = !isnothing(args_transposed_attr) && MLIR.bool_value(args_transposed_attr)
 
             return_transposed_attr = MLIR.get_attribute_by_name(op, Passes.COIL_RETURN_TRANSPOSED_ATTR_NAME)
-            return_transposed = !isnothing(return_transposed_attr) && MLIR.get_bool_value(return_transposed_attr)
+            return_transposed = !isnothing(return_transposed_attr) && MLIR.bool_value(return_transposed_attr)
             break
         end
     end
 
-    bytecode = compile_to_bytecode(module_; hal_target)
+    bytecode = compile_to_bytecode(compiler_session, module_; hal_target)
     session = IREE.Session(IREE.Instance(), IREE.SessionOptions(), device)
 
     IREE.append_bytecode!(session, bytecode)

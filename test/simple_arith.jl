@@ -5,7 +5,7 @@ using Coil
 @testset "Tracing: Simple Arithmetic" begin
     @testset "Tracing: Simple Value Function ($op)" for op in (+, -, *, /)
         @eval f(x, y) = $op(x, y)
-        cf = Coil.compile(f)
+        cf = Coil.compile(f; allow_scalar_args=true)
 
         a, b = rand(Int32), rand(Int32)
 
@@ -24,7 +24,7 @@ end
 
 @testset "Tracing: Nary operation" begin
     f(x) = +(x...)
-    cf = Coil.compile(f; verbose=false)
+    cf = Coil.compile(f; verbose=false, allow_scalar_args=true)
     x = [1,2,3]
 
     @test f(x) == cf(x)
@@ -33,7 +33,7 @@ end
 
 @testset "Tracing: Unary functions" begin
     f(x) = sqrt(x)
-    cf = Coil.compile(f; verbose=false)
+    cf = Coil.compile(f; verbose=false, allow_scalar_args=true)
 
     x = rand(Float32)
     @test f(x) == cf(x)
@@ -78,7 +78,7 @@ end
 
 @testset "Tracing: fma" begin
     f(a, b, c) = fma(a, b, c)
-    cf = Coil.compile(f)
+    cf = Coil.compile(f; allow_scalar_args=true)
 
     a = rand(Float32)
     b = rand(Float32)

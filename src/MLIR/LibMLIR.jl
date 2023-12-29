@@ -3,7 +3,7 @@ module LibMLIR
 import Artifacts
 import ...Coil: @cvcall
 
-const libmlir = joinpath(Artifacts.artifact"libIREECompiler", "lib/libIREECompiler.so.0")
+const libmlir = joinpath(Artifacts.artifact"libIREECompiler", "lib/libIREECompiler.so")
 if !isfile(libmlir)
     error("🔴🔴🔴 '$libmlir' not found, try changing its definition at $(@__FILE__):$(@__LINE__() - 2)")
 end
@@ -27,7 +27,9 @@ for T in (:MlirContext,
     :MlirExternalPass,
     :MlirPassManager,
     :MlirOpPassManager,
-    :MlirTypeIDAllocator,)
+    :MlirTypeIDAllocator,
+    :MlirAffineMap,
+    :MlirAffineExpr,)
     @eval struct $T
         ptr::Ptr{Cvoid}
     end
@@ -52,7 +54,7 @@ struct MlirLogicalResult
 end
 
 struct MlirStringRef
-    char::Ptr{Cchar}
+    data::Ptr{Cchar}
     length::Csize_t
 end
 
@@ -184,6 +186,8 @@ mlirDenseElementsAttrInt32Get(type, nints, ints) =
     @cvcall libmlir.mlirDenseElementsAttrInt32Get(type::MlirType, nints::intptr_t, ints::Ptr{Int32})::MlirAttribute
 mlirDenseElementsAttrInt64Get(type, nints, ints) =
     @cvcall libmlir.mlirDenseElementsAttrInt64Get(type::MlirType, nints::intptr_t, ints::Ptr{Int64})::MlirAttribute
+mlirDenseI32ArrayGet(context, size, values) =
+    @cvcall libmlir.mlirDenseI32ArrayGet(context::MlirContext, size::intptr_t, values::Ptr{Int32})::MlirAttribute
 mlirDenseI64ArrayGet(context, size, values) =
     @cvcall libmlir.mlirDenseI64ArrayGet(context::MlirContext, size::intptr_t, values::Ptr{Int64})::MlirAttribute
 mlirFloatAttrDoubleGet(context, type, f) =
@@ -203,6 +207,22 @@ mlirArrayAttrGet(context, nelements, elements) =
 mlirBoolAttrGet(context, value) = @cvcall libmlir.mlirBoolAttrGet(context::MlirContext, value::Cint)::MlirAttribute
 mlirAttributeIsABool(attribute) = @cvcall libmlir.mlirAttributeIsABool(attribute::MlirAttribute)::Bool
 mlirBoolAttrGetValue(attribute) = @cvcall libmlir.mlirBoolAttrGetValue(attribute::MlirAttribute)::Bool
+mlirAffineMapAttrGet(map) = @cvcall libmlir.mlirAffineMapAttrGet(map::MlirAffineMap)::MlirAttribute
+
+### Affine
+
+mlirAffineMulExprGet(a, b) = @cvcall libmlir.mlirAffineMulExprGet(a::MlirAffineExpr, b::MlirAffineExpr)::MlirAffineExpr
+mlirAffineAddExprGet(a, b) = @cvcall libmlir.mlirAffineAddExprGet(a::MlirAffineExpr, b::MlirAffineExpr)::MlirAffineExpr
+mlirAffineModExprGet(a, b) = @cvcall libmlir.mlirAffineModExprGet(a::MlirAffineExpr, b::MlirAffineExpr)::MlirAffineExpr
+mlirAffineSymbolExprGet(context, position) = @cvcall libmlir.mlirAffineSymbolExprGet(context::MlirContext, position::intptr_t)::MlirAffineExpr
+mlirAffineDimExprGet(context, position) = @cvcall libmlir.mlirAffineDimExprGet(context::MlirContext, position::intptr_t)::MlirAffineExpr
+mlirAffineConstantExprGet(context, val) = @cvcall libmlir.mlirAffineConstantExprGet(context::MlirContext, val::Int64)::MlirAffineExpr
+
+mlirAffineMapDump(map) = @cvcall libmlir.mlirAffineMapDump(map::MlirAffineMap)::Cvoid
+mlirAffineMapGet(context, dimCount, symbolCount, nAffineExprs, exprs) =
+    @cvcall libmlir.mlirAffineMapGet(context::MlirContext, dimCount::intptr_t, symbolCount::intptr_t, nAffineExprs::intptr_t, exprs::Ptr{MlirAffineExpr})::MlirAffineMap
+mlirAffineMapMultiDimIdentityGet(context, ndims) =
+    @cvcall libmlir.mlirAffineMapMultiDimIdentityGet(context::MlirContext, ndims::intptr_t)::MlirAffineMap
 
 ### Identifier
 
@@ -340,6 +360,8 @@ mlirOperationStateEnableResultTypeInference(state) =
 
 mlirOpPrintingFlagsCreate() =
     @cvcall libmlir.mlirOpPrintingFlagsCreate()::MlirOpPrintingFlags
+mlirOpPrintingFlagsDestroy(flags) =
+    @cvcall libmlir.mlirOpPrintingFlagsDestroy(flags::MlirOpPrintingFlags)::Cvoid
 mlirOpPrintingFlagsEnableDebugInfo(flags, enable, pretty) =
     @cvcall libmlir.mlirOpPrintingFlagsEnableDebugInfo(flags::MlirOpPrintingFlags, enable::Bool, pretty::Bool)::Cvoid
 
@@ -392,7 +414,7 @@ mlirPassManagerCreate(context) = @cvcall libmlir.mlirPassManagerCreate(context::
 mlirPassManagerDestroy(pm) = @cvcall libmlir.mlirPassManagerDestroy(pm::MlirPassManager)::Cvoid
 mlirPassManagerIsNull(pm) = mlirIsNull(pm)
 mlirPassManagerGetAsOpPassManager(pm) = @cvcall libmlir.mlirPassManagerGetAsOpPassManager(pm::MlirPassManager)::MlirOpPassManager
-mlirPassManagerRun(pm, module_) = @cvcall libmlir.mlirPassManagerRun(pm::MlirPassManager, module_::MlirModule)::MlirLogicalResult
+mlirPassManagerRunOnOp(pm, op) = @cvcall libmlir.mlirPassManagerRunOnOp(pm::MlirPassManager, op::MlirOperation)::MlirLogicalResult
 mlirPassManagerEnableVerifier(pm) = @cvcall libmlir.mlirPassManagerEnableVerifier(pm::MlirPassManager)::Cvoid
 mlirPassManagerAddOwnedPass(pm, pass) = @cvcall libmlir.mlirPassManagerAddOwnedPass(pm::MlirPassManager, pass::MlirPass)::Cvoid
 mlirPassManagerGetNestedUnder(pm, opname) = @cvcall libmlir.mlirPassManagerGetNestedUnder(pm::MlirPassManager, opname::MlirStringRef)::MlirOpPassManager

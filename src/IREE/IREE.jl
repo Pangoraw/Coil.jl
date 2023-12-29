@@ -3,7 +3,7 @@ module IREE
 import Libdl
 import Artifacts
 
-const libiree = joinpath(Artifacts.artifact"libIREECompiler", "lib", "libIREECompiler.so.0")
+const libiree = joinpath(Artifacts.artifact"libIREECompiler", "lib/libIREECompiler.so")
 if !isfile(libiree)
     error("🔴🔴🔴 '$libiree' not found, try changing its definition at $(@__FILE__):$(@__LINE__() - 2)")
 end
@@ -30,67 +30,106 @@ include("./compiler.jl")
 include("./runtime.jl")
 
 import ..MLIR
-using .Compiler:
-    IreeCompilerOptions
 
 const iree_registered_targets_and_passes = Ref(false)
 
 function register_all_dialects!(context)
     if !iree_registered_targets_and_passes[]
-        Compiler.ireeCompilerRegisterTargetBackends()
-        Compiler.ireeCompilerRegisterAllPasses()
         iree_registered_targets_and_passes[] = true
     end
 
-    Compiler.ireeCompilerRegisterAllDialects(context)
+    MLIR.LibMLIR.mlirContextLoadAllAvailableDialects(context)
+
+    registry = MLIR.DialectRegistry()
+    Compiler.ireeCompilerRegisterDialects(registry)
+    MLIR.LibMLIR.mlirContextAppendDialectRegistry(context, registry)
 
     context
 end
 
-mutable struct CompilerOptions
-    options::IreeCompilerOptions
-
-    CompilerOptions(options::IreeCompilerOptions) = begin
-        finalizer(new(options)) do options
-            Compiler.ireeCompilerOptionsDestroy(options.options)
-        end
-    end
+function version()
+    v = Compiler.ireeCompilerGetAPIVersion()
+    minor = v % UInt16
+    major = (v >> 16) % UInt16
+    rev = unsafe_string(Compiler.ireeCompilerGetRevision())
+    build = isempty(rev) ? () : (rev,)
+    VersionNumber(major, minor, 0, (), build)
 end
 
-CompilerOptions(flags) = begin
-    if !iree_registered_targets_and_passes[]
-        Compiler.ireeCompilerRegisterTargetBackends()
-        Compiler.ireeCompilerRegisterAllPasses()
-        iree_registered_targets_and_passes[] = true
-    end
-
-    options = CompilerOptions(Compiler.ireeCompilerOptionsCreate())
-
-    io = IOBuffer()
-    c_print_callback = @cfunction(MLIR.print_callback, Cvoid, (MLIR.MlirStringRef, Any))
-    ref = Ref(io)
-
-    result = GC.@preserve ref Compiler.ireeCompilerOptionsSetFlags(
-        options,
-        length(flags), flags,
-        c_print_callback, Base.pointer_from_objref(ref),
-    )
-
-    if MLIR.LibMLIR.mlirLogicalResultIsFailure(result)
-        msg = String(take!(io))
-        throw("failed to create CompilerOptions: $msg")
-    end
-
-    return options
+mutable struct CompilerSession
+    sess::Ptr{Compiler.iree_compiler_session_t}
+    CompilerSession() = finalizer(Compiler.ireeCompilerSessionDestroy, new(Compiler.ireeCompilerSessionCreate()))
 end
 
-Base.convert(::Type{IreeCompilerOptions}, options::CompilerOptions) = options.options
+Base.cconvert(::Type{Ptr{Compiler.iree_compiler_session_t}}, sess::CompilerSession) = sess
+Base.unsafe_convert(::Type{Ptr{Compiler.iree_compiler_session_t}}, sess::CompilerSession) = sess.sess
+
+"""
+Session must outlive context.
+"""
+function borrow_context(sess)
+    MLIR.Context(Compiler.ireeCompilerSessionBorrowContext(sess))
+end
+
+struct IREECompilerError <: Exception
+    msg::String
+end
+
+Base.showerror(io::IO, err::IREECompilerError) = print(io, "IREE: ", err.msg)
+
+function _check_err(err)
+    err == C_NULL && return
+    msg = Compiler.ireeCompilerErrorGetMessage(err)
+    msg = unsafe_string(msg)
+    Compiler.ireeCompilerErrorDestroy(err)
+    error(msg)
+end
+
+function translate_module_to_vm_bytecode(sess, module_, options)
+    local bytecode
+
+    err = Compiler.ireeCompilerSessionSetFlags(sess, length(options), options)
+    _check_err(err)
+
+    invocation = Compiler.ireeCompilerInvocationCreate(sess)
+    Compiler.ireeCompilerInvocationSetVerifyIR(invocation, true)
+
+    output = Ref{Ptr{Compiler.iree_compiler_output_t}}(C_NULL)
+    try
+        success = Compiler.ireeCompilerInvocationImportBorrowModule(
+            invocation,
+            MLIR.get_operation(module_),
+        )
+        success || error("failed to translate to vm")
+
+
+        err = Compiler.ireeCompilerOutputOpenMembuffer(output)
+        _check_err(err)
+
+        success = Compiler.ireeCompilerInvocationPipeline(invocation, Compiler.IREE_COMPILER_PIPELINE_STD)
+        success || error("failed to run pipeline")
+
+        err = Compiler.ireeCompilerInvocationOutputVMBytecode(invocation, output[])
+        _check_err(err)
+
+        contents = Ref{Ptr{Cvoid}}()
+        size = Ref{UInt64}()
+        err = Compiler.ireeCompilerOutputMapMemory(output[], contents, size)
+        _check_err(err)
+
+        bytecode = Vector{UInt8}(undef, size[])
+        unsafe_copyto!(pointer(bytecode), Ptr{UInt8}(contents[]), size[])
+    finally
+        output != C_NULL && Compiler.ireeCompilerOutputDestroy(output[])
+        Compiler.ireeCompilerInvocationDestroy(invocation)
+    end
+
+    bytecode
+end
 
 ### Pass Manager
 
-build_vm_pass_pipeline!(op_pass, options) =
-    Compiler.ireeCompilerBuildIREEVMPassPipeline(options, op_pass)
-
+#=
 function translate_module_to_vm_bytecode(module_, options)
     io = IOBuffer()
     c_print_callback = @cfunction(MLIR.print_callback, Cvoid, (MLIR.MlirStringRef, Any))
@@ -103,11 +142,13 @@ function translate_module_to_vm_bytecode(module_, options)
     )
     take!(io)
 end
+=#
 
 ## Runtime
 
 using .Runtime:
     iree_hal_buffer_view_t,
+    iree_hal_buffer_t,
     iree_runtime_instance_options_t,
     iree_hal_driver_registry_t,
     iree_runtime_instance_t,
@@ -479,18 +520,16 @@ function calling_convention(call)
     collect(args) => collect(results)
 end
 
-iree_hal_buffer_view_type_id() = @ccall libiree_runtime.iree_hal_buffer_view_type_id()::Runtime.iree_vm_ref_type_t
+iree_vm_list_set_buffer_view_retain(list, idx, view) =
+    @ccall libiree_runtime.iree_vm_list_set_buffer_view_retain(list::Ptr{iree_vm_list_t},
+                                                               idx::Runtime.iree_host_size_t,
+                                                               view::Ptr{iree_hal_buffer_view_t})::iree_status_t
 
 function set_ref!(list, i, view)
-    value = Ref(Runtime.iree_vm_ref_t(Tuple(zero(UInt8) for _ in 1:16)))
-    @iree_check GC.@preserve value Runtime.iree_vm_ref_wrap_assign(
-        view, iree_hal_buffer_view_type_id(),
-        Base.pointer_from_objref(value),
-    )
-
-    @iree_check GC.@preserve value Runtime.iree_vm_list_set_ref_retain(
-        list, i - 1, Base.pointer_from_objref(value)
-    )
+    # @iree_check iree_vm_list_set_buffer_view_retain(list, i - 1, view)
+    ref = @ccall libiree.iree_hal_buffer_view_move_ref(view::Ptr{iree_hal_buffer_view_t})::Runtime.iree_vm_ref_t
+    ref_ref = Ref(ref)
+    Runtime.iree_vm_list_set_ref_move(list, i-1, ref_ref)
 end
 
 const IREE_RUNTIME_CALLING_CONVENTION_REF = Char('r')
@@ -500,23 +539,22 @@ function (call::Call)(args...)
     args_cconv, results_cconv = calling_convention(call)
     @assert length(args) == args_count "expected $(args_count) arguments but got $(length(args))"
 
-    @iree_check Runtime.iree_vm_list_resize(call.call.inputs, length(args))
+    # @iree_check Runtime.iree_vm_list_resize(call.call.inputs, length(args))
 
     # Push args
     for (i, (arg, arg_cconv)) in enumerate(zip(args, args_cconv))
         if arg isa AbstractArray && arg_cconv == IREE_RUNTIME_CALLING_CONVENTION_REF
-            set_ref!(
-                call.call.inputs, i,
-                call.args_transposed ?
-                ColMajorBufferView(call.session.device, arg) :
-                BufferView(call.session.device, arg),
-            )
+            view = call.args_transposed ?
+                   ColMajorBufferView(call.session.device, arg) :
+                   BufferView(call.session.device, arg)
+            # set_ref!(call.call.inputs, i, view)
+            @iree_check @ccall libiree_runtime.iree_runtime_call_inputs_push_back_buffer_view(call::Ptr{iree_runtime_call_t},
+                                                                                              view::Ptr{iree_hal_buffer_view_t})::iree_status_t
         elseif arg_cconv != IREE_RUNTIME_CALLING_CONVENTION_REF
             in_value = Ref(to_vm_value(arg))
             @iree_check GC.@preserve in_value begin
-                Runtime.iree_vm_list_set_value(
+                Runtime.iree_vm_list_push_value(
                     call.call.inputs,
-                    i - 1,
                     Base.pointer_from_objref(in_value),
                 )
             end
@@ -538,10 +576,7 @@ function (call::Call)(args...)
     res = map(enumerate(Iterators.reverse(results_cconv))) do (i, result_cconv)
         if result_cconv == IREE_RUNTIME_CALLING_CONVENTION_REF
             ret = Ref(Ptr{iree_hal_buffer_view_t}())
-            @iree_check GC.@preserve ret begin
-                iree_runtime_call_outputs_pop_front_buffer_view(
-                    call, Base.pointer_from_objref(ret))
-            end
+            @iree_check iree_runtime_call_outputs_pop_front_buffer_view(call, ret)
             buffer_view = ret[]
             N = Runtime.iree_hal_buffer_view_shape_rank(buffer_view)
             iree_type = Runtime.iree_hal_buffer_view_element_type(buffer_view)
@@ -667,8 +702,6 @@ function iree_type(T)
     throw("invalid IREE type $T")
 end
 
-mutable struct iree_hal_buffer_t end
-
 function row_majorize(a::AbstractArray{T,N}) where {T,N}
     strides = zeros(Int, N)
     prev = 1
@@ -693,14 +726,12 @@ function ColMajorBufferView(device, a::AbstractArray{T,N}) where {T,N}
     )
 end
 
-# light-weight wrapper around iree_hal_buffer_view_allocate_buffer 
 function make_iree_hal_buffer_view_t(device, sz, a::AbstractArray{T,N}) where {T,N}
-    out_buffer = Ref(Ptr{iree_hal_buffer_view_t}())
+    numel = prod(sz) * sizeof(T)
 
-    @iree_check GC.@preserve a out_buffer Runtime.iree_hal_buffer_view_allocate_buffer(
+    out_buffer = Ref(Ptr{iree_hal_buffer_t}())
+    @iree_check Runtime.iree_hal_allocator_allocate_buffer(
         Runtime.iree_hal_device_allocator(device),
-        N, collect(sz),
-        iree_type(T), Runtime.IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
         Runtime.iree_hal_buffer_params_t(
             Runtime.IREE_HAL_BUFFER_USAGE_DEFAULT,
             0,
@@ -708,11 +739,26 @@ function make_iree_hal_buffer_view_t(device, sz, a::AbstractArray{T,N}) where {T
             zero(Runtime.iree_hal_queue_affinity_t),
             zero(Runtime.iree_device_size_t),
         ),
-        Runtime.iree_const_byte_span_t(pointer(a), sizeof(a)),
-        Base.unsafe_convert(Ptr{Ptr{Runtime.iree_hal_buffer_view_t}}, Base.pointer_from_objref(out_buffer),)
+        numel,
+        out_buffer,
     )
 
-    out_buffer[]
+    @iree_check GC.@preserve a Runtime.iree_hal_buffer_map_write(
+        out_buffer[], 0, 
+        Ptr{Cvoid}(pointer(a)), numel,
+    )
+
+    out_buffer_view = Ref(Ptr{iree_hal_buffer_view_t}())
+    sz = convert(Vector{Csize_t}, collect(sz))
+    @iree_check Runtime.iree_hal_buffer_view_create(
+        out_buffer[], N, sz,
+        iree_type(T),
+        Runtime.IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+        Runtime.iree_hal_device_host_allocator(device),
+        out_buffer_view,
+    )
+
+    out_buffer_view[]
 end
 
 BufferView(_::Device, view::BufferView) = view
@@ -907,6 +953,15 @@ function from_vm_value(val)
     else
         throw("unsupported result type $(val.type)")
     end
+end
+
+mutable struct GlobalInitializer end
+
+const global_init = Ref{GlobalInitializer}()
+
+function __init__()
+    Compiler.ireeCompilerGlobalInitialize()
+    global_init[] = finalizer(_ -> Compiler.ireeCompilerGlobalShutdown(), GlobalInitializer())
 end
 
 end # module IREE
