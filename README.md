@@ -1,3 +1,8 @@
+> [!note]
+> The development for Coil is currently stopped. [Reactant.jl](https://github.com/EnzymeAD/Reactant.jl) is a more active initiative in this direction but running on the xla stack.
+>
+> In the future, the IREE runtime support of Coil can be extracted and fed with the generated code from Reactant.
+
 # Coil.jl
 
 > An experimental package to lower and execute Julia tensor operations to the IREE compiler stack using MLIR.
